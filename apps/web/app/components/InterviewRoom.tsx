@@ -38,7 +38,7 @@ export default function InterviewRoom({
 }) {
   const [conn, setConn] = useState<{ token: string; room: string; url: string } | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [camera, setCamera] = useState(false);
+  const [camera, setCamera] = useState(!agentless);
   const [mic, setMic] = useState(true);
 
   useEffect(() => {
