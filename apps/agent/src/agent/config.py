@@ -6,11 +6,16 @@ Real provider stack (see docs/API使用手册.md):
 Env vars are mapped case-insensitively by pydantic-settings from field names."""
 
 from functools import lru_cache
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# .env lives at apps/agent/.env; anchor to this module so config is CWD-independent.
+_ENV_FILE = str(Path(__file__).resolve().parents[2] / ".env")
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore")
 
     app_env: str = "dev"
 

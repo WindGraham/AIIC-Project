@@ -79,12 +79,18 @@ def _run_live(ctx: InterviewContext, candidate_responder: Callable[[str, str], s
             break
         seen.add(q.id)
         # ask the current question
-        ans = candidate_responder(q.text, transcript_so_far(ctx))
+        try:
+            ans = candidate_responder(q.text, transcript_so_far(ctx))
+        except Exception:
+            ans = "(no answer)"
         ctx.answers.append(AnswerRecord(question_id=q.id, transcript=ans or "(no answer)", status="answered"))
         # optional single follow-up: only if the question flagged followups and turns budget remains
         if q.followups and turns + 1 < max_turns:
             fu = q.followups[0]
-            fu_ans = candidate_responder(fu, transcript_so_far(ctx))
+            try:
+                fu_ans = candidate_responder(fu, transcript_so_far(ctx))
+            except Exception:
+                fu_ans = ""
             ctx.answers.append(AnswerRecord(question_id=f"{q.id}::fu", transcript=f"[follow-up] {fu_ans or ''}", status="answered"))
         ctx.cursor += 1
         turns += 1

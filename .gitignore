@@ -41,3 +41,9 @@ docs/API使用手册.md
 research/ai-mock-interview/
 research/interview-video-tools/
 research/reference/
+
+# harness self-play 产出（回归语料输出，不入库）
+apps/agent/harness/run_out/
+
+# researcher runtime cache (live API search results; not source)
+apps/agent/src/agent/researcher/researcher_cache.json

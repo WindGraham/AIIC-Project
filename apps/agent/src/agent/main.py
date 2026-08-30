@@ -63,8 +63,9 @@ def health():
         "status": "ok",
         "app_env": s.app_env,
         "llm": {"configured": bool(s.llm_api_key), "model": s.llm_model},
-        "stt": {"deepgram": bool(s.deepgram_api_key), "model": s.stt_model},
-        "tts": {"elevenlabs": bool(s.elevenlabs_api_key), "model": s.tts_model},
+        "vision": {"configured": bool(s.gemini_api_key), "model": s.gemini_model},
+        "stt": {"configured": bool(s.volcengine_api_key), "resource_id": s.volcengine_asr_resource_id},
+        "tts": {"configured": bool(s.minimax_api_key), "model": s.minimax_tts_model},
         "livekit": {"url": s.livekit_url, "configured": bool(s.livekit_api_key)},
         "search": {"xhs": bool(s.xhs_cookie), "zhihu": bool(s.zhihu_d_cookie)},
     }
