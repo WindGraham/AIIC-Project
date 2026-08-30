@@ -117,6 +117,56 @@ def _put_context(iid: str, ctx: InterviewContext) -> None:
     _CONTEXTS[iid] = ctx
 
 
+def _prepare_booking_config(b: dict) -> dict:
+    """Normalize a booking dict into the per-interview live config (used at prep)."""
+    persona = b.get("persona", "high-peer") if b.get("persona") in PERSONA_LEVELS else "high-peer"
+    sched = b.get("scheduled_at", "")
+    try:
+        sdt = datetime.fromisoformat(str(sched))
+        if sdt.tzinfo is not None:
+            sdt = sdt.astimezone(timezone.utc).replace(tzinfo=None)
+    except Exception:
+        sdt = datetime.utcnow()
+    return {
+        "has_coding": bool(b.get("has_coding", True)),
+        "notes": b.get("notes", ""),
+        "scenario": b.get("scenario", "algorithm"),
+        "persona": persona,
+        "strictness": b.get("strictness", "standard") if b.get("strictness") in STRICTNESS_LEVELS else "standard",
+        "scheduled_at": sdt,
+        "asap": bool(b.get("asap", False)),
+    }
+
+
+def _submit_prep(interview_id: str, b: dict, user_id: str) -> None:
+    """Kick off background prep (Researcher search + plan) for an interview.
+
+    Called at BOOKING time (so prep starts as soon as the user books) and also as a
+    fallback at /start for legacy bookings. Marks pending; on success stores the
+    InterviewContext, on failure marks the interview 'failed' (red light).
+    """
+    _PENDING.add(interview_id)
+    _owner = _OWNER.get(interview_id) or user_id
+    _OWNER[interview_id] = _owner
+    _BOOKING_CFG[interview_id] = _prepare_booking_config(b)
+
+    def _do_start():
+        try:
+            persona_inner = b.get("persona", "high-peer") if b.get("persona") in PERSONA_LEVELS else "high-peer"
+            ctx = build_plan(b.get("resume_text", ""), b.get("jd_text", ""), b.get("company", ""),
+                             b.get("position", ""), "mid", "zh", persona=persona_inner,
+                             memory_brief=_history_brief(_owner, b.get("position", "")))
+            _put_context(interview_id, ctx)
+            _FAILED.discard(interview_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("prep failed: %s", exc)
+            _FAILED.add(interview_id)
+        finally:
+            _PENDING.discard(interview_id)
+
+    _PREP_EXECUTOR.submit(_do_start)
+
+
 def _history_brief(user_id: str, position: str, limit: int = 6) -> str:
     """C2 cross-field memory: a short brief of the user's past weak points so the
     next interviewer plan targets them (the 'learning curve' signal). Empty if none."""
@@ -234,7 +284,11 @@ def book_interview(payload: Booking, user: dict = Depends(_auth_user)):
         if (dt - now).total_seconds() < MIN_BOOKING_AHEAD_MIN * 60:
             raise HTTPException(400, f"预约时间需至少在当前时间之后 {MIN_BOOKING_AHEAD_MIN} 分钟")
     store.save_booking(user["id"], payload.model_dump())
-    return payload
+    # 预约一提交即开始后台准备（Researcher 搜索 + 出题），到点/尽快开始即可直接用。
+    iid = str(uuid.uuid4())
+    _BOOKING_TO_INTERVIEW[payload.id] = iid
+    _submit_prep(iid, payload.model_dump(), user["id"])
+    return {**payload.model_dump(), "interview_id": iid}
 
 
 @app.get("/api/interviews")
@@ -273,52 +327,20 @@ def start_interview(booking_id: str, user: dict = Depends(_auth_user)):
     b = get_store().get_booking(user["id"], booking_id)
     if b is None:
         raise HTTPException(404, "booking not found")
-    iid = str(uuid.uuid4())
-    _BOOKING_TO_INTERVIEW[booking_id] = iid
+    # Prep was kicked off at booking time; reuse the already-prepared interview id.
+    iid = _BOOKING_TO_INTERVIEW.get(booking_id)
+    if iid is None or iid not in _OWNER:
+        # Legacy/edge case: no prep started yet -> create + prepare now.
+        iid = str(uuid.uuid4())
+        _BOOKING_TO_INTERVIEW[booking_id] = iid
+        _submit_prep(iid, b, user["id"])
     persona = b.get("persona", "high-peer") if b.get("persona") in PERSONA_LEVELS else "high-peer"
-    _PENDING.add(iid)
-    _OWNER[iid] = user["id"]
-    sched = b.get("scheduled_at", "")
-    try:
-        sdt = datetime.fromisoformat(str(sched))
-        if sdt.tzinfo is not None:
-            sdt = sdt.astimezone(timezone.utc).replace(tzinfo=None)
-    except Exception:
-        sdt = datetime.utcnow()
-    _BOOKING_CFG[iid] = {
-        "has_coding": bool(b.get("has_coding", True)),
-        "notes": b.get("notes", ""),
-        "scenario": b.get("scenario", "algorithm"),
-        "persona": persona,
-        "strictness": b.get("strictness", "standard") if b.get("strictness") in STRICTNESS_LEVELS else "standard",
-        "scheduled_at": sdt,
-        "asap": bool(b.get("asap", False)),
-    }
-
-    def _do_start():
-        """Run build_plan (search + LLM) in a worker; store the context when done.
-        On failure, mark the interview as failed (red light) so the UI can surface
-        a 'cannot start' state instead of a silent 404."""
-        try:
-            persona_inner = b.get("persona", "high-peer") if b.get("persona") in PERSONA_LEVELS else "high-peer"
-            ctx = build_plan(b.get("resume_text", ""), b.get("jd_text", ""), b.get("company", ""),
-                             b.get("position", ""), "mid", "zh", persona=persona_inner,
-                             memory_brief=_history_brief(user["id"], b.get("position", "")))
-            _put_context(iid, ctx)
-            _FAILED.discard(iid)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("prep failed for %s: %s", booking_id, exc)
-            _FAILED.add(iid)
-        finally:
-            _PENDING.discard(iid)
-
-    _PREP_EXECUTOR.submit(_do_start)
-    # Answer-ready only when context is built; the room polls /next meanwhile.
     ctx = _CONTEXTS.get(iid)
+    status = "ready" if ctx is not None else ("failed" if iid in _FAILED else "preparing")
     return {
         "interview_id": iid,
         "booking_id": booking_id,
-        "status": "preparing" if ctx is None else "ready",
+        "status": status,
         "question": ask_current(ctx) if ctx else None,
         "persona": persona,
         "asap": b.get("asap", False),
