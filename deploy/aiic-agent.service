@@ -7,6 +7,10 @@ Type=simple
 WorkingDirectory=/root/AIIC-Project/apps/agent
 EnvironmentFile=/root/AIIC-Project/apps/agent/.env
 Environment=PYTHONPATH=/root/AIIC-Project/apps/agent/src
+Environment=https_proxy=http://127.0.0.1:7890
+Environment=http_proxy=http://127.0.0.1:7890
+Environment=HTTPS_PROXY=http://127.0.0.1:7890
+Environment=HTTP_PROXY=http://127.0.0.1:7890
 ExecStart=/root/AIIC-Project/apps/agent/.venv/bin/python -m uvicorn agent.main:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=3
