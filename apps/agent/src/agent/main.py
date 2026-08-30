@@ -70,6 +70,7 @@ class Booking(BaseModel):
     name: str = "模拟面试"
     resume_id: str = ""
     resume_text: str = ""
+    jd_id: str = ""              # 关联的预设置岗位 JD（公司/岗位/JD 一键带入）
     company: str = ""
     position: str = ""
     jd_text: str = ""
@@ -142,10 +143,16 @@ def _history_brief(user_id: str, position: str, limit: int = 6) -> str:
 
 @app.on_event("startup")
 def _startup():
-    """Opportunistic hygiene on boot: drop expired sessions."""
+    """Opportunistic hygiene on boot: drop expired sessions + seed default resume/JD
+    for any existing user that doesn't have one yet (so older accounts get them too)."""
     try:
         get_store().purge_expired_sessions()
     except Exception:
+        pass
+    try:
+        for uid in get_store().list_user_ids():
+            seed_defaults_for_user(uid)
+    except Exception:  # noqa: BLE001
         pass
 
 
@@ -188,6 +195,19 @@ def book_interview(payload: Booking, user: dict = Depends(_auth_user)):
     # Server-owned id: never trust a client-supplied id (prevents cross-user
     # overwrite via INSERT OR REPLACE on a guessed/observed booking id).
     payload.id = str(uuid.uuid4())
+    store = get_store()
+    # 若选择了预设置的岗位 JD，一键带入 公司/岗位/JD 文本。
+    if payload.jd_id:
+        jd = store.get_jd(user["id"], payload.jd_id)
+        if jd:
+            payload.company = payload.company or jd.get("company", "")
+            payload.position = payload.position or jd.get("position", "")
+            payload.jd_text = jd.get("jd_text", "")
+    # 若选择了预设置的简历，一键带入简历文本。
+    if payload.resume_id:
+        r = store.get_resume(user["id"], payload.resume_id)
+        if r:
+            payload.resume_text = r.get("resume_text", "")
     # Validate persona against the allow-list (block prompt-injection into the
     # interviewer-planning LLM via the persona field).
     if payload.persona not in PERSONA_LEVELS:
@@ -206,7 +226,7 @@ def book_interview(payload: Booking, user: dict = Depends(_auth_user)):
         now = datetime.utcnow()
         if (dt - now).total_seconds() < MIN_BOOKING_AHEAD_MIN * 60:
             raise HTTPException(400, f"预约时间需至少在当前时间之后 {MIN_BOOKING_AHEAD_MIN} 分钟")
-    get_store().save_booking(user["id"], payload.model_dump())
+    store.save_booking(user["id"], payload.model_dump())
     return payload
 
 
@@ -316,8 +336,36 @@ def register(req: RegisterRequest):
         user = get_store().create_user(req.username, req.password)
     except ValueError as e:
         raise HTTPException(400, str(e))
+    seed_defaults_for_user(user["id"])
     token = get_store().create_session(user["id"])
     return {"user": user, "token": token}
+
+
+def seed_defaults_for_user(user_id: str) -> None:
+    """给新注册用户"默认拥有"一份脱敏简历 + 一份岗位 JD（从 docs 样例读入）。
+
+    仅当用户还没有任何简历/JD 时才创建，且第一条设为默认；用户可自行增删改。
+    """
+    try:
+        # docs/ lives at the repo root (parents[4] from this file).
+        docdir = Path(__file__).resolve().parents[4] / "docs"
+        resume_file = docdir / "简历样例-脱敏.md"
+        jd_file = docdir / "JD样例-脱敏.md"
+        resume_text = resume_file.read_text(encoding="utf-8") if resume_file.exists() else ""
+        jd_text = jd_file.read_text(encoding="utf-8") if jd_file.exists() else ""
+        store = get_store()
+        # 脱敏样例简历
+        if resume_text.strip():
+            existing_resumes = store.list_resumes(user_id)
+            if not existing_resumes:
+                store.create_resume(user_id, "默认简历（样例）", resume_text, ["C++", "Python", "Go", "LLM"], is_default=True)
+        # 脱敏样例 JD
+        if jd_text.strip():
+            existing_jds = store.list_jds(user_id)
+            if not existing_jds:
+                store.create_jd(user_id, "默认岗位（样例）", "某互联网大厂", "AI 应用开发实习生", jd_text, is_default=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("seed_defaults_for_user failed: %s", exc)
 
 
 @app.post("/api/auth/login")
@@ -404,6 +452,43 @@ def update_resume(resume_id: str, req: ResumeIn, user: dict = Depends(_auth_user
 def delete_resume(resume_id: str, user: dict = Depends(_auth_user)):
     if not get_store().delete_resume(user["id"], resume_id):
         raise HTTPException(404, "resume not found")
+    return {"ok": True}
+
+
+# --- 岗位 JD 管理（可提前设置，预约时选择；每人可设默认） ---------------
+class JDIn(BaseModel):
+    name: str = "我的岗位JD"
+    company: str = ""
+    position: str = ""
+    jd_text: str
+    is_default: bool = False
+
+
+@app.get("/api/jds")
+def list_jds(user: dict = Depends(_auth_user)):
+    return get_store().list_jds(user["id"])
+
+
+@app.post("/api/jds", status_code=201)
+def create_jd(req: JDIn, user: dict = Depends(_auth_user)):
+    if not req.jd_text.strip():
+        raise HTTPException(400, "jd_text is required")
+    return get_store().create_jd(user["id"], req.name, req.company, req.position, req.jd_text, req.is_default)
+
+
+@app.put("/api/jds/{jd_id}")
+def update_jd(jd_id: str, req: JDIn, user: dict = Depends(_auth_user)):
+    got = get_store().update_jd(user["id"], jd_id, name=req.name, company=req.company,
+                                position=req.position, jd_text=req.jd_text, is_default=req.is_default)
+    if got is None:
+        raise HTTPException(404, "jd not found")
+    return got
+
+
+@app.delete("/api/jds/{jd_id}")
+def delete_jd(jd_id: str, user: dict = Depends(_auth_user)):
+    if not get_store().delete_jd(user["id"], jd_id):
+        raise HTTPException(404, "jd not found")
     return {"ok": True}
 
 

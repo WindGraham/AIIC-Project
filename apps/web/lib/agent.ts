@@ -102,6 +102,40 @@ export async function deleteResume(id: string) {
 }
 
 // ---------------------------------------------------------------------------
+// Job-description (JD) presets
+// ---------------------------------------------------------------------------
+export type JD = {
+  id: string;
+  user_id: string;
+  name: string;
+  company: string;
+  position: string;
+  jd_text: string;
+  is_default: boolean;
+  created_at: string;
+};
+
+export async function listJds(): Promise<JD[]> {
+  try {
+    return await call("/api/jds");
+  } catch {
+    return [];
+  }
+}
+
+export async function createJd(body: Partial<JD>): Promise<JD> {
+  return call("/api/jds", { method: "POST", body: JSON.stringify(body) });
+}
+
+export async function updateJd(id: string, body: Partial<JD>): Promise<JD> {
+  return call(`/api/jds/${id}`, { method: "PUT", body: JSON.stringify(body) });
+}
+
+export async function deleteJd(id: string) {
+  return call(`/api/jds/${id}`, { method: "DELETE" });
+}
+
+// ---------------------------------------------------------------------------
 // Bookings / interviews
 // ---------------------------------------------------------------------------
 export type Booking = {

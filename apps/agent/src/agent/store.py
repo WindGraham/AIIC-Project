@@ -52,12 +52,23 @@ CREATE TABLE IF NOT EXISTS resumes (
     is_default  INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS jds (
+    id          TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    company     TEXT NOT NULL DEFAULT '',
+    position    TEXT NOT NULL DEFAULT '',
+    jd_text     TEXT NOT NULL,
+    is_default  INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS bookings (
     id          TEXT PRIMARY KEY,
     user_id     TEXT NOT NULL,
     name        TEXT NOT NULL,
     resume_id   TEXT NOT NULL DEFAULT '',
     resume_text TEXT NOT NULL DEFAULT '',
+    jd_id       TEXT NOT NULL DEFAULT '',
     company     TEXT NOT NULL DEFAULT '',
     position    TEXT NOT NULL DEFAULT '',
     jd_text     TEXT NOT NULL DEFAULT '',
@@ -84,6 +95,7 @@ CREATE TABLE IF NOT EXISTS reports (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_resumes_user ON resumes(user_id);
+CREATE INDEX IF NOT EXISTS idx_jds_user ON jds(user_id);
 CREATE INDEX IF NOT EXISTS idx_bookings_user ON bookings(user_id);
 CREATE INDEX IF NOT EXISTS idx_reports_user ON reports(user_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_interview ON reports(interview_id);
@@ -133,6 +145,8 @@ class Store:
                 conn.execute("ALTER TABLE bookings ADD COLUMN mode TEXT NOT NULL DEFAULT 'duplex'")
             if "asap" not in cols:
                 conn.execute("ALTER TABLE bookings ADD COLUMN asap INTEGER NOT NULL DEFAULT 0")
+            if "jd_id" not in cols:
+                conn.execute("ALTER TABLE bookings ADD COLUMN jd_id TEXT NOT NULL DEFAULT ''")
         except sqlite3.Error:
             pass  # column exists / table missing — nothing to do
 
@@ -163,6 +177,11 @@ class Store:
         except sqlite3.IntegrityError as e:
             raise ValueError("username already exists") from e
         return {"id": user_id, "username": username}
+
+    def list_user_ids(self) -> list[str]:
+        with self._conn() as conn:
+            rows = conn.execute("SELECT id FROM users").fetchall()
+        return [r["id"] for r in rows]
 
     def verify_user(self, username: str, password: str) -> Optional[dict[str, Any]]:
         username = (username or "").strip()
@@ -293,6 +312,71 @@ class Store:
             "created_at": r["created_at"],
         }
 
+    # -- JDs (company/position/jd_text presets) -------------------------------
+    def list_jds(self, user_id: str) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM jds WHERE user_id=? ORDER BY is_default DESC, created_at DESC", (user_id,)
+            ).fetchall()
+        return [self._jd_row(r) for r in rows]
+
+    def get_jd(self, user_id: str, jd_id: str) -> Optional[dict[str, Any]]:
+        with self._conn() as conn:
+            r = conn.execute("SELECT * FROM jds WHERE id=? AND user_id=?", (jd_id, user_id)).fetchone()
+        return self._jd_row(r) if r else None
+
+    def create_jd(self, user_id: str, name: str, company: str, position: str, jd_text: str,
+                  is_default: bool = False) -> dict[str, Any]:
+        jid = str(uuid.uuid4())
+        with self._conn() as conn:
+            if is_default:
+                conn.execute("UPDATE jds SET is_default=0 WHERE user_id=?", (user_id,))
+            conn.execute(
+                "INSERT INTO jds(id, user_id, name, company, position, jd_text, is_default, created_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (jid, user_id, name, company, position, jd_text, 1 if is_default else 0, self._now().isoformat()),
+            )
+        return self.get_jd(user_id, jid)  # type: ignore[return-value]
+
+    def update_jd(self, user_id: str, jd_id: str, *, name: Optional[str] = None,
+                  company: Optional[str] = None, position: Optional[str] = None,
+                  jd_text: Optional[str] = None, is_default: Optional[bool] = None) -> Optional[dict[str, Any]]:
+        existing = self.get_jd(user_id, jd_id)
+        if existing is None:
+            return None
+        if is_default is True:
+            with self._conn() as conn:
+                conn.execute("UPDATE jds SET is_default=0 WHERE user_id=?", (user_id,))
+        fields, vals = [], []
+        if name is not None: fields.append("name=?"); vals.append(name)
+        if company is not None: fields.append("company=?"); vals.append(company)
+        if position is not None: fields.append("position=?"); vals.append(position)
+        if jd_text is not None: fields.append("jd_text=?"); vals.append(jd_text)
+        if is_default is not None: fields.append("is_default=?"); vals.append(1 if is_default else 0)
+        if fields:
+            vals.append(jd_id); vals.append(user_id)
+            with self._conn() as conn:
+                conn.execute(f"UPDATE jds SET {', '.join(fields)} WHERE id=? AND user_id=?", vals)
+        return self.get_jd(user_id, jd_id)
+
+    def delete_jd(self, user_id: str, jd_id: str) -> bool:
+        with self._conn() as conn:
+            cur = conn.execute("DELETE FROM jds WHERE id=? AND user_id=?", (jd_id, user_id))
+        return cur.rowcount > 0
+
+    @staticmethod
+    def _jd_row(r: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": r["id"],
+            "user_id": r["user_id"],
+            "name": r["name"],
+            "company": r["company"],
+            "position": r["position"],
+            "jd_text": r["jd_text"],
+            "is_default": bool(r["is_default"]),
+            "created_at": r["created_at"],
+        }
+
     # -- bookings ------------------------------------------------------------
     def list_bookings(self, user_id: str) -> list[dict[str, Any]]:
         with self._conn() as conn:
@@ -308,12 +392,13 @@ class Store:
         bid = booking.get("id") or str(uuid.uuid4())
         with self._conn() as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO bookings(id, user_id, name, resume_id, resume_text, company, position, "
+                "INSERT OR REPLACE INTO bookings(id, user_id, name, resume_id, resume_text, jd_id, company, position, "
                 "jd_text, scheduled_at, notes, has_coding, scenario, persona, mode, asap, created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (bid, user_id, booking.get("name", "模拟面试"), booking.get("resume_id", ""),
-                 booking.get("resume_text", ""), booking.get("company", ""), booking.get("position", ""),
-                 booking.get("jd_text", ""), str(booking.get("scheduled_at", self._now().isoformat())),
+                 booking.get("resume_text", ""), booking.get("jd_id", ""), booking.get("company", ""),
+                 booking.get("position", ""), booking.get("jd_text", ""),
+                 str(booking.get("scheduled_at", self._now().isoformat())),
                  booking.get("notes", ""), 1 if booking.get("has_coding", True) else 0,
                  booking.get("scenario", "algorithm"), booking.get("persona", "high-peer"),
                  booking.get("mode", "duplex"), 1 if booking.get("asap", False) else 0,
@@ -329,6 +414,7 @@ class Store:
             "name": b["name"],
             "resume_id": b["resume_id"],
             "resume_text": b["resume_text"],
+            "jd_id": b["jd_id"] if "jd_id" in b.keys() else "",
             "company": b["company"],
             "position": b["position"],
             "jd_text": b["jd_text"],

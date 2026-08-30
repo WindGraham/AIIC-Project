@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Resume } from "@/lib/agent";
+import JdManager from "@/app/components/JdManager";
 
 export default function Resumes() {
   const [resumes, setResumes] = useState<Resume[]>([]);
@@ -168,6 +169,10 @@ export default function Resumes() {
             </div>
           )}
         </div>
+      </div>
+
+      <div className="mt-6">
+        <JdManager />
       </div>
     </main>
   );

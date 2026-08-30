@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { Resume } from "@/lib/agent";
+import type { Resume, JD } from "@/lib/agent";
 
 const PERSONAS = [
   { value: "peer", label: "同级同事", desc: "平等友好，重在技术切磋、引导与鼓励" },
@@ -19,10 +19,12 @@ const MODES = [
 export default function Booking() {
   const router = useRouter();
   const [resumes, setResumes] = useState<Resume[]>([]);
+  const [jds, setJds] = useState<JD[]>([]);
   const [f, setF] = useState({
     name: "",
     resume_id: "",
     resume_text: "",
+    jd_id: "",
     company: "",
     position: "",
     jd_text: "",
@@ -38,12 +40,20 @@ export default function Booking() {
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
-    const r = await fetch("/api/resumes");
+    const [r, j] = await Promise.all([fetch("/api/resumes"), fetch("/api/jds")]);
     if (r.ok) setResumes(await r.json());
+    if (j.ok) setJds(await j.json());
   }, []);
 
   useEffect(() => {
-    load();
+    load().then(() => {
+      // 每人预选"默认"简历与"默认"JD。
+      const defResume = resumes.find((x) => x.is_default);
+      setF((s) => ({ ...s, resume_id: defResume?.id || "", resume_text: defResume?.resume_text || s.resume_text }));
+      const defJd = jds.find((x) => x.is_default) || jds[0];
+      if (defJd) setF((s) => ({ ...s, jd_id: defJd.id, company: defJd.company, position: defJd.position, jd_text: defJd.jd_text }));
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [load]);
 
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) =>
@@ -52,6 +62,11 @@ export default function Booking() {
   function pickResume(id: string) {
     const r = resumes.find((x) => x.id === id);
     setF((s) => ({ ...s, resume_id: id, resume_text: r?.resume_text || s.resume_text }));
+  }
+
+  function pickJd(id: string) {
+    const j = jds.find((x) => x.id === id);
+    setF((s) => ({ ...s, jd_id: id, company: j?.company || "", position: j?.position || "", jd_text: j?.jd_text || "" }));
   }
 
   async function submit(e: React.FormEvent) {
@@ -114,6 +129,16 @@ export default function Booking() {
               value={f.resume_text} onChange={set("resume_text")} />
           </label>
         )}
+
+        <label className="flex flex-col gap-1 text-sm">
+          岗位 JD（可复用 · 在「管理简历」页维护）
+          <select className="rounded-lg border border-white/10 bg-white/5 p-2" value={f.jd_id}
+            onChange={(e) => pickJd(e.target.value)}>
+            <option value="">手动填写 公司/岗位/JD</option>
+            {jds.map((j) => <option key={j.id} value={j.id}>{j.name}（{j.company} · {j.position}）</option>)}
+          </select>
+          <span className="text-xs text-white/40">选择后自动带入公司 / 岗位 / JD 文本，可再微调。</span>
+        </label>
 
         <div className="grid grid-cols-2 gap-4">
           <label className="flex flex-col gap-1 text-sm">
