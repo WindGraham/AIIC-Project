@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { createRecorder, playAudioBase64 } from "@/lib/voice";
 import CodingPanel from "@/app/components/CodingPanel";
+import ScreenRead from "@/app/components/ScreenRead";
 
 type Turn = { role: "ai" | "cand"; text: string };
 
@@ -111,6 +112,12 @@ export default function Room() {
       {section === "coding" && !done && (
         <div className="mb-4">
           <CodingPanel interviewId={id} />
+        </div>
+      )}
+
+      {!done && (
+        <div className="mb-4">
+          <ScreenRead onRead={(text) => addTurn("ai", "【看屏幕】" + text.slice(0, 220))} />
         </div>
       )}
 

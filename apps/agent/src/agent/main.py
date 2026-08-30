@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from .config import get_settings
 from .contracts import InterviewContext
 from .coding import judge_code, load_problem
+from .llm import LLM
 from .pipeline import ask_current, current_question, finalize, record_answer
 from .prep import build_plan
 from .stt import transcribe_flash
@@ -256,3 +257,20 @@ def coding_judge(req: CodingJudgeRequest):
     prob = load_problem(q.problem_id) if q else None
     verdict = judge_code(prob, req.code, req.language)
     return verdict
+
+
+# ---------------------------------------------------------------------------
+# Screen / image reading via Gemini vision (the "AI 看屏幕" capability)
+# ---------------------------------------------------------------------------
+class VisionCall(BaseModel):
+    image_b64: str
+    prompt: str = "请读取并简要描述这个画面里最重要的内容。"
+    mime: str = "image/png"
+
+
+@app.post("/api/vision/analyze")
+def vision_analyze(req: VisionCall):
+    try:
+        return {"description": LLM().vision(req.prompt, req.image_b64, req.mime)}
+    except Exception as e:
+        return {"description": "", "error": str(e)}

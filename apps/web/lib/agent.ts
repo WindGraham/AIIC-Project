@@ -66,3 +66,7 @@ export async function codingJudge(body: {
 }): Promise<any> {
   return call("/api/coding/judge", { method: "POST", body: JSON.stringify(body) });
 }
+
+export async function visionAnalyze(body: { image_b64: string; prompt?: string }): Promise<any> {
+  return call("/api/vision/analyze", { method: "POST", body: JSON.stringify(body) });
+}
