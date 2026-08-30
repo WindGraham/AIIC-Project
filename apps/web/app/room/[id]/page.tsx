@@ -284,8 +284,22 @@ export default function Room() {
     }
   }
 
-  function downloadTranscript() {
-    const text = convo.map((t) => `${t.role === "ai" ? "面试官" : "我"}: ${t.text}`).join("\n\n");
+  // 面试流程测试：一键跳到手撕代码环节。
+  async function jumpCodes() {
+    setBusy(true);
+    try {
+      const d = await fetch(`/api/interviews/${id}/code`, { method: "GET" }).then((r) => r.json());
+      if (d?.gated) { setQ(d.state_label || "未到预约时间，暂不能答题。"); return; }
+      if (d?.ok === false) { addTurn("ai", "（本场未开启手撕代码：" + (d.error || "") + "）"); return; }
+      if (d.next_question) { addTurn("ai", d.next_question); setQ(d.next_question); }
+      setSection(d.section);
+      setStateLabel(d.state_label || null);
+    } catch {
+      addTurn("ai", "（跳转手撕代码失败，请重试）");
+    } finally { setBusy(false); }
+  }
+
+  function downloadTranscript() {    const text = convo.map((t) => `${t.role === "ai" ? "面试官" : "我"}: ${t.text}`).join("\n\n");
     const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -314,6 +328,11 @@ export default function Room() {
           </div>
         </div>
         <div className="flex gap-2">
+          <button onClick={jumpCodes} disabled={done || busy}
+            className="rounded-lg border border-amber-400/40 text-amber-300 hover:bg-amber-500/10 px-3 py-2 text-sm font-semibold"
+            title="测试阶段：点击直接进入手撕代码环节，agent 出题后写代码">
+            ⚡ 手撕代码
+          </button>
           <button onClick={() => setShowTranscript((v) => !v)}
             className="rounded-lg border border-white/10 hover:border-white/30 px-3 py-2 text-sm text-white/70">
             {showTranscript ? "隐藏转写" : "实时转写"}

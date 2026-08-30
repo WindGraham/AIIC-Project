@@ -204,6 +204,10 @@ export async function getNext(interviewId: string): Promise<{ question: string |
   return call(`/api/interviews/${interviewId}/next`);
 }
 
+export async function jumpToCode(interviewId: string): Promise<any> {
+  return call(`/api/interviews/${interviewId}/code`);
+}
+
 export async function postAnswer(interviewId: string, answer: string): Promise<{ next_question: string | null; done: boolean }> {
   return call(`/api/interviews/${interviewId}/answer`, { method: "POST", body: JSON.stringify({ answer }) });
 }

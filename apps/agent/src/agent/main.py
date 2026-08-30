@@ -678,6 +678,31 @@ def answer(interview_id: str, req: dict, user: dict = Depends(_auth_user)):
             "phase": flow.phase, "state": flow.state, "state_label": flow.state_label()}
 
 
+@app.get("/api/interviews/{interview_id}/code")
+def jump_to_code(interview_id: str, user: dict = Depends(_auth_user)):
+    """面试流程测试：一键跳到手撕代码环节。返回 agent 输出的题目/指引与当前状态。
+
+    如果还没开场，先开场；然后把状态机跳到 coding；返回 agent 生成的手撕题指引，
+    前端据此显示 CodingPanel（题目 + 编辑器）。
+    """
+    _check_owner(interview_id, user)
+    ctx = _require_ctx(interview_id)
+    if not _can_start_now(interview_id):
+        return {"gated": True, "next_question": None, "state": None, "state_label": "未到预约时间"}
+    flow = _flow_for(interview_id)
+    if not flow.opened:
+        flow.opening_line()
+    ok = flow.jump_to_coding()
+    if not ok:
+        return {"ok": False, "error": "该场预约未开启手撕代码环节", "state": flow.state, "state_label": flow.state_label()}
+    # 产生 agent 对手撕环节的一句话（题目/引导）。
+    line = flow._ask_agent()
+    if not line:
+        line = flow._fallback_line()
+    return {"ok": True, "next_question": line, "state": flow.state, "state_label": flow.state_label(),
+            "section": flow.section_for_ui()}
+
+
 @app.get("/api/interviews/{interview_id}/report")
 def report(interview_id: str, user: Optional[dict] = Depends(_optional_user)):
     ctx = _require_ctx(interview_id)

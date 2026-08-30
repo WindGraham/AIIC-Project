@@ -209,6 +209,25 @@ class LiveFlow:
     def open_states(self) -> list[str]:
         return self._states()
 
+    def jump_to_coding(self) -> bool:
+        """Directly jump the interview to the 手撕代码 (coding) state.
+
+        Used by the '面试流程' test control so the user can skip straight to the
+        hand-code round (agent presents the problem, then user writes code).
+        Returns True on success, False if the booking has no coding round.
+        """
+        ss = self._states()
+        if "coding" not in ss:
+            return False
+        idx = ss.index("coding")
+        self._state_index = idx
+        self._state_entry_users = self._user_count()
+        self.state_started_at = time.monotonic()
+        if not self.coding_announced:
+            self.coding_announced = True
+            self.coding_elapsed_start = time.monotonic()
+        return True
+
     def _elapsed_min(self) -> float:
         return (time.monotonic() - self.started_at) / 60.0
 
@@ -387,7 +406,8 @@ class LiveFlow:
             "project_qa": "这是主环节：围绕候选人刚介绍的项目深入提问（架构、难点、数据、取舍、踩坑），逐层加深。",
             "knowledge": "项目问得差不多了，转向该岗位需要的基础/专业知识/软实力提问（结合岗位要求与候选人的薄弱点）。",
             "role": "请问候选人关于这个岗位/公司的问题，例如为什么想来、对岗位的理解、职业规划、能否接受某类工作节奏。",
-            "coding": "进入手撕代码环节：简述题目，引导候选人先讲思路，再要求其在代码区作答，你负责观察与提示。",
+            "coding": "【手撕代码】现在必须直接进入手撕代码环节：先引入并给出这道算法题（题目/输入输出示例/难度），"
+                     "再请候选人在代码区作答（先讲思路，后写码），你在旁观察、提示与评判。不要再聊项目或自我介绍。",
             "wrap": "做收尾：感谢候选人，简要点出亮点与可改进处，并留时间让候选人反问。（你说完这句即结束）",
         }.get(state, "请自然、专业地推进面试。")
 

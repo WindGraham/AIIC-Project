@@ -1,35 +1,32 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
 /**
  * Returns the agent WebSocket base URL for the full-duplex voice client.
  *
- * The browser cannot read server-side env (AGENT_API_URL / AGENT_WS_URL), so
- * this tiny HTTP route is the single source of truth: the client fetches it at
- * runtime and appends `?interview_id=<id>` before opening the socket.
+ * The browser cannot read server-side env (AGENT_API_URL / AGENT_WS_URL), so this
+ * route is the single source of truth. The client fetches it at runtime and appends
+ * `?interview_id=<id>` before opening the socket.
+ *
+ * IMPORTANT: the returned URL must be *browser-reachable* — never 127.0.0.1. We
+ * build it from the request's Host so the socket goes to the same public host the
+ * page is served from (nginx upgrades /ws/voice -> agent), e.g. wss://mock.windgraham.art/ws/voice.
  *
  * WHY NOT A RAW WS PROXY HERE? Next.js App Router route handlers are plain
- * request/response functions — Next never hands them the HTTP upgrade, so they
- * cannot tunnel a WebSocket to the agent. The client therefore connects to the
- * agent directly; in production nginx performs the upgrade (see
- * deploy/nginx.conf, `location /ws/voice`).
+ * request/response functions — Next never hands them the HTTP upgrade, so they cannot
+ * tunnel a WebSocket to the agent. The client therefore connects to the agent
+ * directly; nginx performs the upgrade (see deploy/nginx.conf, `location /ws/voice`).
  */
 
 export const dynamic = "force-dynamic";
 
-function toWsUrl(httpUrl: string): string {
-  try {
-    const u = new URL(httpUrl);
-    u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
-    u.pathname = "/ws/voice";
-    u.search = "";
-    return u.toString().replace(/\/+$/, "");
-  } catch {
-    return "ws://127.0.0.1:8000/ws/voice";
-  }
-}
+export async function GET(req: NextRequest) {
+  // 1) Explicit build-time override.
+  const explicit = process.env.NEXT_PUBLIC_AGENT_WS_URL?.trim() || process.env.AGENT_WS_URL?.trim();
+  if (explicit) return NextResponse.json({ url: explicit.replace(/\/$/, ""), endpoint: "wss://<host>/ws/voice?interview_id=<id>" });
 
-export async function GET() {
-  const explicit = process.env.AGENT_WS_URL?.trim();
-  const url = explicit || toWsUrl(process.env.AGENT_API_URL || "http://127.0.0.1:8000");
-  return NextResponse.json({ url, endpoint: "ws://<agent>/ws/voice?interview_id=<id>" });
+  // 2) Same-origin, derived from the browser's request host (browser-reachable public URL).
+  const host = req.headers.get("host") || req.nextUrl.host || "mock.windgraham.art";
+  const proto = req.nextUrl.protocol.startsWith("https") ? "wss" : "ws";
+  const url = `${proto}://${host}/ws/voice`;
+  return NextResponse.json({ url, endpoint: "wss://<host>/ws/voice?interview_id=<id>" });
 }
