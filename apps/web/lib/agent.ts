@@ -151,6 +151,7 @@ export type Booking = {
   has_coding: boolean;
   scenario: string;
   persona: string;
+  strictness: string;
   mode: string;
   asap: boolean;
   created_at: string;
@@ -243,6 +244,10 @@ export async function visionAnalyze(body: { image_b64: string; prompt?: string }
 
 export async function getTranscript(interviewId: string): Promise<any> {
   return call(`/api/interviews/${interviewId}/transcript`);
+}
+
+export async function getInterviewSummary(interviewId: string): Promise<any> {
+  return call(`/api/interviews/${interviewId}/summary`);
 }
 
 export async function getRecap(interviewId: string): Promise<any> {

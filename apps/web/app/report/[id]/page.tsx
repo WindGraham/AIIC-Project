@@ -28,6 +28,11 @@ export default async function Report({ params }: { params: Promise<{ id: string 
         <p className="mt-2 text-white/70">{r.summary}</p>
       </div>
 
+      <Link href={`/summary/${id}`}
+        className="inline-block mb-6 rounded-lg bg-indigo-500 hover:bg-indigo-400 px-4 py-2 text-sm font-semibold">
+        📄 查看本次面试总结文档
+      </Link>
+
       <h2 className="text-lg font-semibold mb-3">分项得分</h2>
       <ul className="grid grid-cols-1 gap-2 mb-6">
         {(r.items || []).map((s: any, i: number) => (

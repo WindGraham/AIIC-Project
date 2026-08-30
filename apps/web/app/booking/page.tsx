@@ -16,6 +16,12 @@ const MODES = [
   { value: "text", label: "文字对话", desc: "打字一问一答，最稳定，适合快速练习" },
 ];
 
+const STRICTNESS = [
+  { value: "relaxed", label: "宽松练习", desc: "多引导鼓励，可提示，评分放宽" },
+  { value: "standard", label: "标准", desc: "正常面试，提示有限，按实际表现评分" },
+  { value: "strict", label: "严格", desc: "高压终面，追问到底，按真实水平严格评分" },
+];
+
 export default function Booking() {
   const router = useRouter();
   const [resumes, setResumes] = useState<Resume[]>([]);
@@ -33,6 +39,7 @@ export default function Booking() {
     has_coding: true,
     scenario: "algorithm",
     persona: "high-peer",
+    strictness: "standard",
     mode: "duplex",
     asap: false,
   });
@@ -189,6 +196,15 @@ export default function Booking() {
             </select>
           </label>
         </div>
+
+        <label className="flex flex-col gap-1 text-sm">
+          面试官严格程度
+          <select className="rounded-lg border border-white/10 bg-white/5 p-2" value={f.strictness}
+            onChange={set("strictness")}>
+            {STRICTNESS.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+          </select>
+          <span className="text-xs text-white/40">{STRICTNESS.find((s) => s.value === f.strictness)?.desc}</span>
+        </label>
 
         <div className="flex flex-col gap-1 text-sm">
           <span>面试方案</span>

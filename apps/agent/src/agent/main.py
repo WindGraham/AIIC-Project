@@ -18,6 +18,8 @@ from .store import PERSONA_LEVELS, get_store
 
 # Interview modes selectable at booking: text chat / push-to-talk / full-duplex.
 MODES = ("text", "ptt", "duplex")
+# 面试官严格程度 (relaxed/standard/strict).
+STRICTNESS_LEVELS = ("relaxed", "standard", "strict")
 # 预约制上架下限：预约时间必须至少在当前时间之后这么多分钟（业务规则）。
 MIN_BOOKING_AHEAD_MIN = 30
 from .contracts import InterviewContext
@@ -79,6 +81,7 @@ class Booking(BaseModel):
     has_coding: bool = True
     scenario: str = "algorithm"  # algorithm | retest(保研复试占位)
     persona: str = "high-peer"   # peer | high-peer | manager
+    strictness: str = "standard" # relaxed | standard | strict (面试官严格程度)
     mode: str = "duplex"         # text | ptt | duplex (面试方案)
     asap: bool = False           # 尽快开始：后台准备完毕即可答题，不受预约时间限制
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -215,6 +218,8 @@ def book_interview(payload: Booking, user: dict = Depends(_auth_user)):
     # Validate interview mode (text | ptt | duplex).
     if payload.mode not in MODES:
         payload.mode = "duplex"
+    if payload.strictness not in STRICTNESS_LEVELS:
+        payload.strictness = "standard"
     if not payload.name:
         payload.name = f"{payload.position or '模拟'}面试"
     # 尽快开始 (asap): allowed at any time; the agent answers as soon as prep done.
@@ -276,6 +281,7 @@ def start_interview(booking_id: str, user: dict = Depends(_auth_user)):
         "notes": b.get("notes", ""),
         "scenario": b.get("scenario", "algorithm"),
         "persona": persona,
+        "strictness": b.get("strictness", "standard") if b.get("strictness") in STRICTNESS_LEVELS else "standard",
         "scheduled_at": sdt,
         "asap": bool(b.get("asap", False)),
     }
@@ -590,6 +596,7 @@ def _flow_for(interview_id: str, *, has_coding: bool | None = None, notes: str |
             scenario=scenario if scenario is not None else str(cfg.get("scenario", "algorithm")),
             group_min=group_min if group_min is not None else 40,
             coding_min=coding_min if coding_min is not None else 20,
+            strictness=str(cfg.get("strictness", "standard")),
         )
         # Ensure the persona in the context matches what the user chose at booking.
         persona = cfg.get("persona")
@@ -1081,3 +1088,70 @@ def get_recap(interview_id: str):
     text = "".join(lines)
     mp3 = synthesize(text)
     return {"text": text, "audio_b64": base64.b64encode(mp3).decode(), "overall": sc.overall}
+
+
+@app.get("/api/interviews/{interview_id}/summary")
+def interview_summary(interview_id: str, user: Optional[dict] = Depends(_optional_user)):
+    """汇总本次面试的全部信息，生成一份可下载/查看的 Markdown 修改建议文档。
+
+    包含：岗位/候选人概览、各环节提问与回答、逐项评分、缺失项(为什么在意/想听到什么/
+    一句话建议)、以及给候选人的改进建议与复习重点。
+    """
+    ctx = _require_ctx(interview_id)
+    sc = ctx.scorecard if (ctx.scorecard and ctx.scorecard.items) else finalize(ctx)
+    os_ = sc.interviewer_os
+    items = _transcript_items(ctx)
+    flow = _FLOWS.get(interview_id)
+    strictness = getattr(flow, "strictness", "standard") if flow else "standard"
+    persona = getattr(flow, "ctx", ctx).persona if flow else getattr(ctx, "persona", "high-peer")
+
+    sec_order = ctx.plan.sections_order
+    sec_label = {"intro": "自我介绍", "behavioral": "项目/经历", "technical": "技术/项目细节",
+                 "coding": "手撕代码", "wrap": "收尾"}
+
+    L: list[str] = []
+    L.append(f"# 模拟面试总结报告 · {ctx.job.position} @ {ctx.job.company}\n")
+    L.append(f"**候选人**：{ctx.candidate.name}  ·  **综合得分**：{sc.overall}/100\n")
+    L.append(f"**岗位**：{ctx.job.position}（{ctx.job.seniority}）@{ctx.job.company}\n")
+    L.append(f"**面试官人格**：{persona}  |  **严格程度**：{strictness}  |  **覆盖环节**：{'、'.join(sec_label.get(s, s) for s in sec_order)}\n")
+
+    # 逐环节：提问 + 回答
+    L.append("\n## 一、面试过程（逐环节）\n")
+    by_sec: dict[str, list[dict]] = {}
+    for it in items:
+        by_sec.setdefault(it["section"], []).append(it)
+    for s in sec_order:
+        label = sec_label.get(s, s)
+        block = by_sec.get(s, [])
+        L.append(f"### {label}\n")
+        if not block:
+            L.append("（本环节未作答）\n")
+        for it in block:
+            L.append(f"**Q**：{it['question']}\n")
+            L.append(f"**A**：{it['answer']}\n")
+
+    # 逐项评分
+    L.append("\n## 二、分项评分\n")
+    for it in sc.items:
+        L.append(f"- **{it.competency}**：{it.score}/5（{it.level}）— {it.evidence}\n")
+
+    # 缺失项 / 面试官想听到什么
+    L.append("\n## 三、面试官想重点听到的（missing slots）\n")
+    for m in os_.missing_slots[:8]:
+        L.append(f"### {m.slot}\n")
+        L.append(f"- 为什么在意：{m.why_it_matters}\n")
+        L.append(f"- 想听到：{'；'.join(m.what_i_want_to_hear)}\n")
+        L.append(f"- 一句话建议：{m.one_line_advice}\n")
+    if not os_.missing_slots:
+        L.append("（无突出缺失项）\n")
+    if os_.hidden_concern:
+        L.append(f"\n**面试官隐忧**：{os_.hidden_concern}\n")
+
+    # 改进建议汇总
+    L.append("\n## 四、改进建议\n")
+    for ns in sc.next_steps:
+        L.append(f"- {ns}\n")
+    L.append("\n---\n*本报告由 ProbeDesk 自动生成，综合本次面试全部问答与评分。*")
+    text = "\n".join(L)
+    return {"markdown": text, "overall": sc.overall}
+

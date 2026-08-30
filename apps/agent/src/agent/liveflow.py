@@ -87,6 +87,15 @@ def _persona_line(persona: str) -> str:
     }.get(persona or "high-peer", "你是一位资深技术面试官。")
 
 
+def _strictness_line(strictness: str) -> str:
+    """严格程度：影响追问深度与评判口径。"""
+    return {
+        "relaxed": "本场为**宽松/练习**模式：多给候选人引导与鼓励，答不上来可适当提示，追问温和，评分时酌情放宽。",
+        "standard": "本场为**标准**模式：像正式面试一样正常追问、给提示有限，按实际表现评分。",
+        "strict": "本场为**严格**模式：像高压/终面一样追问到底，候选人说到的每一个点都要较真，答不上来不轻易放水，按真实水平严格评分。",
+    }.get(strictness or "standard", "本场为标准模式。")
+
+
 def _candidate_brief(ctx: InterviewContext) -> str:
     """Compact resume for the per-round prompt (the '包含候选人的简历' requirement)."""
     c = ctx.candidate
@@ -138,12 +147,14 @@ class LiveFlow:
         group_min: int = DEFAULT_GROUP_MIN,
         coding_min: int = DEFAULT_CODING_MIN,
         turn_budgets: Optional[dict[str, int]] = None,
+        strictness: str = "standard",
     ):
         self.ctx = ctx
         self.lang = lang
         self.has_coding = has_coding
         self.notes = notes or ""
         self.scenario = scenario or "algorithm"
+        self.strictness = strictness if strictness in ("relaxed", "standard", "strict") else "standard"
         self.group_min = int(group_min or DEFAULT_GROUP_MIN)
         self.coding_min = int(coding_min or DEFAULT_CODING_MIN)
         self.total_min = self.group_min + self.coding_min
@@ -339,6 +350,7 @@ class LiveFlow:
             f"【时间预算】已用约 {elapsed:.1f} 分钟，还剩约 {remaining:.1f} 分钟。\n"
             f"【候选人简历】\n{_candidate_brief(self.ctx)}\n"
             f"【本场特点】\n{_requirements_brief(self.ctx, self.notes, self.scenario)}\n"
+            f"【严格程度】{_strictness_line(self.strictness)}\n"
             f"{('【跨场记忆】' + memory) if memory else ''}\n"
             + (f"【候选人当前屏幕/摄像头看到的内容（旁注，连续画面）】\n{self.screen_context()}\n" if self.screen_notes else "")
             + "【最重要的面试要求 —— 像真人一样对话】\n"
