@@ -116,6 +116,7 @@ export default function Room() {
   const [mic, setMic] = useState<MicState>("off");
   const [partial, setPartial] = useState("");
   const lastAiRef = useRef<string>("");
+  const composingRef = useRef(false);   // 输入法组词中（IME composition）回车不发送
   const [recording, setRecording] = useState(false);   // 点击开始录音 / 再点停止并发送
   const [pttProcessing, setPttProcessing] = useState(false); // converting speech -> text
   const recorderRef = useRef<ReturnType<typeof createSessionRecorder> | null>(null);
@@ -445,7 +446,15 @@ export default function Room() {
               placeholder={done ? "面试已结束" : mode === "text" ? "输入你的回答(Enter 发送)…" : "打字回答(可选)…"}
               value={answer}
               onChange={(e) => setAnswer(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && send()}
+              onCompositionStart={() => { composingRef.current = true; }}
+              onCompositionEnd={() => { composingRef.current = false; }}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter" || e.shiftKey) return;
+                // 输入法组词时按回车是用来“选字/确认”的，不发送。
+                if (e.nativeEvent?.isComposing || composingRef.current) return;
+                e.preventDefault();
+                send();
+              }}
               disabled={done}
             />
             <button onClick={send} disabled={done || busy || !answer.trim()}
