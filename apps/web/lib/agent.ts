@@ -46,3 +46,11 @@ export async function postAnswer(interviewId: string, answer: string): Promise<{
 export async function getReport(interviewId: string): Promise<any> {
   return call(`/api/interviews/${interviewId}/report`);
 }
+
+export async function voiceAnswer(body: {
+  interview_id: string;
+  audio_b64?: string;
+  format?: string;
+}): Promise<any> {
+  return call("/api/voice/answer", { method: "POST", body: JSON.stringify(body) });
+}

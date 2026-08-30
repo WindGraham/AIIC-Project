@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
+import { createRecorder, playAudioBase64 } from "@/lib/voice";
 
 type Turn = { role: "ai" | "cand"; text: string };
 
@@ -15,14 +16,27 @@ export default function Room() {
   const [convo, setConvo] = useState<Turn[]>([]);
   const [answer, setAnswer] = useState("");
   const [busy, setBusy] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const recRef = useRef<{ start(): Promise<void>; stop(): Promise<string> } | null>(null);
 
+  const addTurn = (role: "ai" | "cand", text: string) => setConvo((c) => [...c, { role, text }]);
+
+  // on mount: load the first question (text) + speak it (voice start)
   useEffect(() => {
     (async () => {
       try {
         const d = await (await fetch(`/api/interviews/${id}/next`)).json();
         setQ(d.question);
+        if (d.question) addTurn("ai", d.question);
         if (d.done) setDone(true);
-        setConvo((c) => (d.question ? [...c, { role: "ai", text: d.question }] : c));
+        // speak the current question
+        try {
+          const v = await (await fetch("/api/voice/answer", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ interview_id: id, audio_b64: "" }),
+          })).json();
+          if (v.audio_b64) await playAudioBase64(v.audio_b64);
+        } catch {}
       } catch {
         setQ("无法加载面试。");
       }
@@ -33,23 +47,39 @@ export default function Room() {
     if (!answer.trim() || busy) return;
     const a = answer;
     setAnswer("");
-    setConvo((c) => [...c, { role: "cand", text: a }]);
+    addTurn("cand", a);
     setBusy(true);
     try {
       const d = await (await fetch(`/api/interviews/${id}/answer`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ answer: a }),
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ answer: a }),
       })).json();
-      if (d.next_question) {
-        setConvo((c) => [...c, { role: "ai", text: d.next_question }]);
-        setQ(d.next_question);
-      } else {
-        setDone(true);
-      }
-    } finally {
-      setBusy(false);
-    }
+      if (d.next_question) { addTurn("ai", d.next_question); setQ(d.next_question); }
+      else setDone(true);
+    } finally { setBusy(false); }
+  }
+
+  async function onPttStart() {
+    if (busy || done) return;
+    setRecording(true);
+    recRef.current = createRecorder();
+    await recRef.current.start();
+  }
+
+  async function onPttEnd() {
+    if (!recRef.current) return;
+    setBusy(true);
+    const audio = await recRef.current.stop();
+    setRecording(false);
+    try {
+      const d = await (await fetch("/api/voice/answer", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ interview_id: id, audio_b64: audio, format: "wav" }),
+      })).json();
+      if (d.text) addTurn("cand", d.text);
+      if (d.next_question) { addTurn("ai", d.next_question); setQ(d.next_question); }
+      else setDone(true);
+      if (d.audio_b64) await playAudioBase64(d.audio_b64);
+    } finally { setBusy(false); recRef.current = null; }
   }
 
   return (
@@ -73,7 +103,7 @@ export default function Room() {
         {done && <div className="text-center text-white/40 text-sm mt-4">面试结束，可查看报告。</div>}
       </div>
 
-      <div className="flex gap-2">
+      <div className="flex gap-2 items-stretch">
         <textarea
           className="flex-1 rounded-lg border border-white/10 bg-white/5 p-3"
           rows={2}
@@ -84,10 +114,18 @@ export default function Room() {
           disabled={done}
         />
         <button onClick={send} disabled={done || busy || !answer.trim()}
-          className="rounded-lg bg-indigo-500 hover:bg-indigo-400 disabled:opacity-50 px-5 font-semibold">
-          发送
+          className="rounded-lg bg-indigo-500 hover:bg-indigo-400 disabled:opacity-50 px-5 font-semibold">发送</button>
+        <button
+          onPointerDown={onPttStart}
+          onPointerUp={onPttEnd}
+          onPointerLeave={() => recording && onPttEnd()}
+          disabled={done || busy}
+          className={`rounded-lg px-5 font-semibold ${recording ? "bg-red-500 text-white" : "bg-white/10 hover:bg-white/20"}`}
+        >
+          {recording ? "录音中…" : "🎤按住说话"}
         </button>
       </div>
+      <p className="mt-2 text-xs text-white/40">按住说话用语音回答；也可在输入框打字。</p>
     </main>
   );
 }
