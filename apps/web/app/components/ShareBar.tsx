@@ -58,6 +58,8 @@ export default function ShareBar({ interviewId }: { interviewId: string }) {
       <button onClick={copyLink} className="rounded-lg bg-white/10 hover:bg-white/20 px-4 py-2 text-sm">🔗 复制分享链接</button>
       <button onClick={downloadTranscript} disabled={busy} className="rounded-lg bg-white/10 hover:bg-white/20 px-4 py-2 text-sm">📄 下载文字稿</button>
       <button onClick={playRecap} disabled={busy} className="rounded-lg bg-white/10 hover:bg-white/20 px-4 py-2 text-sm">🔊 语音回顾(录制)</button>
+      <a href={`/recordings/${interviewId}`} target="_blank" rel="noreferrer"
+        className="rounded-lg bg-white/10 hover:bg-white/20 px-4 py-2 text-sm">🎥 视频回放(if recorded)</a>
       {msg && <p className="text-xs text-white/60 w-full mt-1">{msg}</p>}
     </div>
   );
