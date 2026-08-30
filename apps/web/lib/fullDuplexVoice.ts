@@ -245,9 +245,18 @@ export function createFullDuplex(interviewId: string, callbacks: FullDuplexCallb
           callbacks.onFinal?.(str("text"));
         }
         break;
-      case "spoken":
-        if (str("text")) callbacks.onSpoken?.(str("text"), str("section") || undefined, str("phase") || undefined);
+      case "spoken": {
+        const t = str("text");
+        if (t) callbacks.onSpoken?.(t, str("section") || undefined, str("phase") || undefined);
+        // 新版协议：spoken 自带完整 `audio`（先行生成好的语音），text 与 voice 同时到达，
+        // 立即播放，实现"语音生成好之后再回复"。若无 audio，则等后续 streaming 音频块。
+        const bundled = str("audio") || str("audio_b64") || str("data");
+        if (bundled) {
+          callbacks.onAudio?.(bundled);
+          playback.enqueue(bundled);
+        }
         break;
+      }
       case "audio": {
         const b64 = str("base64") || str("audio_b64") || str("data");
         if (b64) {

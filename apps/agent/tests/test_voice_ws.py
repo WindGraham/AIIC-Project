@@ -251,6 +251,9 @@ def test_full_duplex_ws_flow(monkeypatch):
     monkeypatch.setattr(vws, "_load_stt_module", lambda: _FakeStreamSTT())
     monkeypatch.setattr(vws, "LLM", _FakeLLM)
     monkeypatch.setattr(vws, "synthesize_stream_async", _fake_tts)
+    # New protocol: the whole line is synthesized at once (full audio) then sent with
+    # `spoken` as the bundled `audio` field. Mock `synthesize` to return fake MP3 bytes.
+    monkeypatch.setattr(vws, "synthesize", lambda text, voice=None: b"ID3fake" + b"\x00" * 64)
 
     frames = []
     client = TestClient(app)
@@ -258,8 +261,8 @@ def test_full_duplex_ws_flow(monkeypatch):
         ws.send_text('{"type":"start"}')
         ws.send_bytes(b"\x00" * 640)
         ws.send_text('{"type":"stop"}')
-        # partial, final, spoken, audio, audio, done
-        for _ in range(6):
+        # partial, final, spoken(with bundled audio), end_turn
+        for _ in range(4):
             frames.append(ws.receive_json())
         ws.close()
 
@@ -267,8 +270,7 @@ def test_full_duplex_ws_flow(monkeypatch):
     assert types[0] == "partial" and frames[0]["text"] == "你"
     assert types[1] == "final" and frames[1]["text"] == "你好，请介绍下你自己"
     assert types[2] == "spoken" and "解决" in frames[2]["text"]
-    assert types[3] == "audio" and types[4] == "audio"
-    assert base64.b64decode(frames[3]["base64"]) == b"ID3fake"
-    # No prepared LiveFlow -> the interview is not over -> normal end is `end_turn`,
-    # NOT `done` (which would incorrectly end the whole interview after one exchange).
-    assert types[5] == "end_turn"
+    # spoken carries the full pre-generated audio (voice is ready with the text).
+    assert base64.b64decode(frames[2]["audio"]).startswith(b"ID3fake")
+    # No prepared LiveFlow -> the interview is not over -> normal end is `end_turn`.
+    assert types[3] == "end_turn"

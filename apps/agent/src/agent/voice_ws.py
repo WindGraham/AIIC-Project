@@ -49,7 +49,7 @@ from fastapi import WebSocket
 
 from .llm import LLM
 from .pipeline import ask_current
-from .tts import synthesize_stream_async
+from .tts import synthesize, synthesize_stream_async
 
 
 def _flow_for(interview_id: str):
@@ -327,17 +327,17 @@ class VoiceSession:
             return
         self._announced = True
         section, phase = self._current_section_phase()
-        await self._send({"type": "spoken", "text": q, "section": section, "phase": phase})
+        # 先生成完整语音，再一并下发 文字 + 语音。
+        audio_b64 = await self._synthesize_full(q)
+        await self._send({"type": "spoken", "text": q, "section": section, "phase": phase,
+                          "audio": audio_b64})
         self.playback_active = True
-        try:
-            async for chunk in synthesize_stream_async(q):
-                await self._send({"type": "audio", "base64": base64.b64encode(chunk).decode("ascii")})
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("tts announce failed: %s", exc)
-        finally:
-            self.playback_active = False
+        if audio_b64:
+            try:
+                await asyncio.sleep(0.4)
+            except asyncio.CancelledError:
+                raise
+        self.playback_active = False
 
     def _end_turn(self) -> None:
         """Finalize the current turn: flush STT, then AI line + TTS."""
@@ -441,19 +441,33 @@ class VoiceSession:
             await self._end_or_continue()
             return
         section, phase = self._current_section_phase()
-        await self._send({"type": "spoken", "text": line, "section": section, "phase": phase})
+        # 先生成完整语音，再一并下发 文字 + 语音，实现"语音生成好之后再回复"。
+        audio_b64 = await self._synthesize_full(line)
+        await self._send({"type": "spoken", "text": line, "section": section, "phase": phase,
+                          "audio": audio_b64})
         self.playback_active = True
-        try:
-            async for chunk in synthesize_stream_async(line):
-                await self._send({"type": "audio", "base64": base64.b64encode(chunk).decode("ascii")})
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("tts stream failed: %s", exc)
-            await self._send({"type": "error", "error": f"tts: {exc}"})
-        finally:
-            self.playback_active = False
+        if audio_b64:
+            try:
+                # 仍在播放窗口内（前端按 audio 播放）；用微小延迟读取 barge-in 输入。
+                await asyncio.sleep(0.4)
+            except asyncio.CancelledError:
+                raise
+        self.playback_active = False
         await self._end_or_continue()
+
+    async def _synthesize_full(self, text: str) -> str:
+        """Synthesize the whole line and return it as one base64 MP3 string.
+
+        Uses a regular (non-streaming) TTS call so the audio is complete before the
+        response frame is sent — the interviewer's voice is ready at the same time the
+        text is delivered. Returns "" on failure (the client can fall back to text).
+        """
+        try:
+            mp3 = await asyncio.to_thread(synthesize, text)
+            return base64.b64encode(mp3).decode("ascii")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("tts full synthesize failed: %s", exc)
+            return ""
 
     async def _end_or_continue(self) -> None:
         """Send the correct end-of-turn signal.
