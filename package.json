@@ -1,0 +1,16 @@
+{
+  "name": "aiic-interview-platform",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@11.5.2",
+  "description": "LiveKit-based AI mock-interview interviewer platform (CS 算法/研发岗)",
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.0"
+  }
+}

@@ -1,0 +1,39 @@
+# deps / build
+node_modules/
+.next/
+dist/
+.turbo/
+pnpm-debug.log*
+
+# python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.poetry/
+
+# env / secrets
+.env
+.env.*
+!.env.example
+
+# recordings / runtime
+recordings/
+*.mp4
+*.webm
+*.wav
+
+# editor / os
+.DS_Store
+*.log
+.idea/
+.vscode/
+
+# test
+coverage/
+*.tsbuildinfo
+
+# third-party clones in research (borrowed locally, NOT our code — don't commit)
+research/ai-mock-interview/
+research/interview-video-tools/
+research/reference/
