@@ -1,6 +1,9 @@
 """Lazy-read settings. No key => build/run still works (offline/mock-first).
-Mirrors DeepInterview's core/config.py philosophy: provider selection defaults
-to mock/offline and is env-overridable."""
+Real provider stack (see docs/API使用手册.md):
+  LLM (DeepSeek, OpenAI-compatible) · vision/low-latency voice LLM (aixhan Gemini :generateContent)
+  STT (Volcengine bigmodel) · TTS (MiniMax).
+
+Env vars are mapped case-insensitively by pydantic-settings from field names."""
 
 from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -11,20 +14,27 @@ class Settings(BaseSettings):
 
     app_env: str = "dev"
 
-    # --- LLM (OpenAI-compatible) ---
+    # --- LLM (DeepSeek, OpenAI-compatible) ---
     llm_base_url: str = "https://api.deepseek.com"
     llm_api_key: str = ""
     llm_model: str = "deepseek-chat"
-    # Vision / multimodal (for AI reading the shared screen) + low-latency voice LLM
-    gemini_api_key: str = ""
-    llm_vision_model: str = ""
 
-    # --- STT / TTS ---
-    deepgram_api_key: str = ""
-    stt_model: str = "nova-2"  # zh-verified; smoke-test nova-3 first
-    elevenlabs_api_key: str = ""
-    cartesia_api_key: str = ""
-    tts_model: str = "eleven_flash_v2_5"
+    # --- Vision / multimodal (aixhan Gemini-compatible, MUST use :generateContent) ---
+    gemini_api_key: str = ""
+    gemini_base_url: str = "https://api.aixhan.com/v1beta"
+    gemini_model: str = "gemini-3.5-flash"
+
+    # --- STT (Volcengine bigmodel) ---
+    volcengine_api_key: str = ""
+    volcengine_asr_resource_id: str = "volc.seedasr.sauc.duration"  # streaming
+    volcengine_asr_ws: str = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
+    # one-shot flash resource id (used for batch / post transcript fallback)
+    volcengine_asr_flash_resource_id: str = "volc.bigasr.auc_turbo"
+
+    # --- TTS (MiniMax) ---
+    minimax_api_key: str = ""
+    minimax_tts_model: str = "speech-01"
+    minimax_tts_voice: str = "male-qn-qingse"
 
     # --- LiveKit (self-hosted; reuse /data/livekit) ---
     livekit_url: str = "ws://127.0.0.1:7880"
