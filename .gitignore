@@ -7,6 +7,7 @@ pnpm-debug.log*
 
 # python
 .venv/
+.cache/
 __pycache__/
 *.pyc
 *.egg-info/
@@ -32,6 +33,9 @@ recordings/
 # test
 coverage/
 *.tsbuildinfo
+
+# secrets manual (contains live API keys — never commit)
+docs/API使用手册.md
 
 # third-party clones in research (borrowed locally, NOT our code — don't commit)
 research/ai-mock-interview/
