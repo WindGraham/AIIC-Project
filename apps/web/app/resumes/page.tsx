@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Resume } from "@/lib/agent";
 
 export default function Resumes() {
@@ -11,6 +11,8 @@ export default function Resumes() {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const [parsing, setParsing] = useState(false);
 
   const load = useCallback(async () => {
     const r = await fetch("/api/resumes");
@@ -20,6 +22,39 @@ export default function Resumes() {
   useEffect(() => { load(); }, [load]);
 
   const sel = resumes.find((r) => r.id === selected) || null;
+
+  async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setErr(null);
+    setParsing(true);
+    try {
+      const buf = await file.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let bin = "";
+      const chunk = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunk) {
+        bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
+      }
+      const data = btoa(bin);
+      const r = await fetch("/api/resumes/parse", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data, filename: file.name }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "解码失败");
+      if (!d.text?.trim()) throw new Error("未从文件中提取到文本");
+      setText(d.text);
+      if (!name) setName(file.name.replace(/\.[^.]+$/, "") || "我的简历");
+      setSkills((s) => s || "");
+    } catch (ex) {
+      setErr("文件解码失败：" + String(ex));
+    } finally {
+      setParsing(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  }
 
   async function create() {
     setErr(null);
@@ -102,9 +137,19 @@ export default function Resumes() {
               onChange={(e) => setName(e.target.value)} placeholder="如：我的后端简历" />
           </label>
           <label className="flex flex-col gap-1 text-sm">
-            简历内容（文本粘贴）
+            简历内容（上传文件自动解码，或直接粘贴文本）
+            <div className="flex items-center gap-2">
+              <button type="button" onClick={() => fileRef.current?.click()} disabled={parsing}
+                className="rounded-lg border border-white/10 hover:border-white/30 bg-white/5 px-3 py-2 text-sm text-white/80">
+                {parsing ? "解码中…" : "📄 上传文件"}
+              </button>
+              <input ref={fileRef} type="file" className="hidden"
+                accept=".pdf,.docx,.md,.txt,.xlsx,.xls,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                onChange={onFile} />
+              <span className="text-xs text-white/40">PDF / Word / Markdown / TXT / Excel</span>
+            </div>
             <textarea className="rounded-lg border border-white/10 bg-white/5 p-3 min-h-36" rows={8}
-              value={text} onChange={(e) => setText(e.target.value)} />
+              value={text} onChange={(e) => setText(e.target.value)} placeholder="上传后自动填入，或直接粘贴/手写" />
           </label>
           <label className="flex flex-col gap-1 text-sm">
             技能（逗号分隔，可选）

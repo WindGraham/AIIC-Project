@@ -103,6 +103,7 @@ export default function Room() {
   const [answer, setAnswer] = useState("");
   const [busy, setBusy] = useState(false);
   const [section, setSection] = useState<string | null>(null);
+  const [stateLabel, setStateLabel] = useState<string | null>(null);
   const [showTranscript, setShowTranscript] = useState(false);
   const [live, setLive] = useState(false); // interview question loaded → enable interaction
   const [mic, setMic] = useState<MicState>("off");
@@ -153,6 +154,7 @@ export default function Room() {
         if (!d || d.status === "preparing") { setQ("面试准备超时，请稍后重试。"); return; }
         setQ(d.question);
         setSection(d.section);
+        setStateLabel(d.state_label || d.phase || null);
         if (d.question) addTurn("ai", d.question);
         if (d.done) setDone(true);
         if (!d.done) setLive(true);
@@ -182,6 +184,7 @@ export default function Room() {
       if (d.next_question) { addTurn("ai", d.next_question); setQ(d.next_question); }
       else setDone(true);
       setSection(d.section);
+      setStateLabel(d.state_label || d.phase || null);
     } finally { setBusy(false); }
   }
 
@@ -216,7 +219,14 @@ export default function Room() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-xl font-bold">面试房间</h1>
-          <div className="text-xs text-white/40 mt-0.5">方案：{MODE_LABEL[mode]}</div>
+          <div className="flex items-center gap-2 mt-0.5">
+            <span className="text-xs text-white/40">方案：{MODE_LABEL[mode]}</span>
+            {stateLabel && (
+              <span className="rounded-full border border-indigo-400/40 bg-indigo-500/15 px-2.5 py-0.5 text-xs text-indigo-300">
+                当前环节：{stateLabel}
+              </span>
+            )}
+          </div>
         </div>
         <div className="flex gap-2">
           <button onClick={() => setShowTranscript((v) => !v)}
@@ -268,24 +278,28 @@ export default function Room() {
         </div>
       )}
 
-      <div className="mb-3">
-        <AgentPresence
-          interviewId={id}
-          active={!done && q !== "加载中…" && q !== "AI 面试官正在准备面试…"}
-          onRead={(text) => addTurn("ai", "【看屏幕】" + text.slice(0, 220))}
-        />
-      </div>
+      {mode !== "text" && (
+        <div className="mb-3">
+          <AgentPresence
+            interviewId={id}
+            active={!done && q !== "加载中…" && q !== "AI 面试官正在准备面试…"}
+            onRead={(text) => addTurn("ai", "【看屏幕】" + text.slice(0, 220))}
+          />
+        </div>
+      )}
 
-      {!done && (
+      {mode !== "text" && !done && (
         <div className="mb-4">
           <ScreenRead onRead={(text) => addTurn("ai", "【看屏幕】" + text.slice(0, 220))} />
         </div>
       )}
 
-      {/* 视频房间：全部模式共用（摄像头/麦克风/屏幕共享/看屏），AI 头像经 AgentPresence 加入 */}
-      <div className="mb-4">
-        <InterviewRoom interviewId={id} />
-      </div>
+      {/* 视频房间：语音模式共用；纯文字流则只关心对话，不展示视频 */}
+      {mode !== "text" && (
+        <div className="mb-4">
+          <InterviewRoom interviewId={id} />
+        </div>
+      )}
 
       {!done && partial && (
         <div className="mb-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm">

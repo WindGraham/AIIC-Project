@@ -1,40 +1,34 @@
-"""Live interviewer flow: a REAL, time-aware interview, not a thrown question list.
+"""Live interviewer flow: an EXPLICIT interview STATE MACHINE, not a thrown list.
 
-The old brain (prep plan + cursor) just walked a pre-fetched question list one by
-one ("网上搜题一个个丢给候选人"). This module replaces that with a **per-round
-LLM agent** that genuinely interviews the candidate:
+The old brain (prep plan + cursor) walked a pre-fetched question list one by one.
+This is a genuine interviewer driven by a clear state machine, so every state's
+agent input/output is controlled and easy to test (particularly the TEXT flow):
 
-  · it knows the interview is ~60 min: 40 min of project / personal / fundamentals
-    + 20 min of hand-code (configurable), and it is told the elapsed time and the
-    remaining budget so it can pace itself;
-  · it opens with self-intro -> one specific project -> then progressively probes
-    project details and fundamentals, choosing depth/follow-ups based on how long
-    the candidate took and how much time is left;
-  · EVERY round rebuilds an agent whose prompt contains: the interviewer identity
-    (persona), the candidate's resume, this interview's special requirements
-    (job/JD/scenario/notes), the cross-interview memory, and the FULL chat history.
+    intro  (介绍自己)  -> project (介绍项目) -> project_qa (提问项目)
+    -> knowledge (提问其他能力/知识) -> role (提问对岗位的看法)
+    -> coding (手撕代码) -> wrap (结束)
 
-The director (this class) is deterministic about WHEN to move between phases (by
-elapsed time as the hard cap, with a turn-based fallback so a fast demo/test still
-reaches the coding round), while the LLM decides WHAT to say and how deep to probe.
+Each state has a deterministic turn budget (how many candidate answers before
+advancing) and its own state-specific agent guidance. EVERY round rebuilds an LLM
+agent whose prompt contains: the interviewer identity (persona), the candidate's
+resume, this interview's special requirements (job/JD/scenario/notes), the
+cross-interview memory, and the FULL chat history. The LLM decides WHAT to say
+inside the current state; the state machine decides WHEN to move on.
 
-Phase order: intro -> project -> probe -> coding -> wrap (coding skipped when the
-booking has no coding round). The flow appends dynamic PlannedQuestion/AnswerRecord
-back into the InterviewContext so the existing report/scoring still works.
+The flow appends dynamic PlannedQuestion/AnswerRecord back into the InterviewContext
+so the existing report/scoring still works.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import time
-from typing import Any, Optional
+from typing import Optional
 
 from .contracts import (
     AnswerRecord,
     InterviewContext,
     PlannedQuestion,
-    QuestionPlan,
     RubricItem,
 )
 from .llm import LLM
@@ -42,13 +36,46 @@ from .prep import _persona_style  # reuse persona tone
 
 logger = logging.getLogger("agent.liveflow")
 
-# Ordered phase ladder.
-_PHASES = ["intro", "project", "probe", "coding", "wrap"]
+# # Ordered interview states (the state machine). 'coding' is dropped when the
+# # booking has no coding round.
+STATES = ["intro", "project", "project_qa", "knowledge", "role", "coding", "wrap"]
 
-# Default budgets (minutes). Conversation (group) = intro+project+probe.
+# Default budgets (minutes).
 DEFAULT_GROUP_MIN = 40
 DEFAULT_CODING_MIN = 20
-DEFAULT_TOTAL_MIN = DEFAULT_GROUP_MIN + DEFAULT_CODING_MIN
+
+# Human labels shown in the UI / demo.
+STATE_LABELS = {
+    "intro": "自我介绍",
+    "project": "介绍项目",
+    "project_qa": "提问项目",
+    "knowledge": "其他能力/知识",
+    "role": "对岗位的看法",
+    "coding": "手撕代码",
+    "wrap": "收尾/结束",
+}
+
+# section_for_ui maps a state to the plan's section names the UI/CodingPanel uses.
+_STATE_SECTION = {
+    "intro": "intro",
+    "project": "behavioral",
+    "project_qa": "technical",
+    "knowledge": "technical",
+    "role": "behavioral",
+    "coding": "coding",
+    "wrap": "wrap",
+}
+
+# Default number of candidate answers before a state advances.
+_STATE_TURN_BUDGET = {
+    "intro": 1,
+    "project": 1,
+    "project_qa": 4,
+    "knowledge": 3,
+    "role": 1,
+    "coding": 4,
+    "wrap": 1,
+}
 
 
 def _persona_line(persona: str) -> str:
@@ -79,7 +106,7 @@ def _requirements_brief(ctx: InterviewContext, notes: str = "", scenario: str = 
     """Special requirements for THIS interview (job/JD + scenario + notes)."""
     j = ctx.job
     gap = ctx.gap
-    lines = [f"岗位：{j.position}（{j.seniority}）@{j.company}"]
+    lines = [f"岗位:{j.position}({j.seniority})@{j.company}"]
     if j.tech_stack:
         lines.append("技术栈：" + "、".join(j.tech_stack))
     if j.must_have:
@@ -98,7 +125,7 @@ def _requirements_brief(ctx: InterviewContext, notes: str = "", scenario: str = 
 
 
 class LiveFlow:
-    """A single live interview: deterministic phase director + per-round agent."""
+    """A single live interview: an EXPLICIT state machine + per-round agent."""
 
     def __init__(
         self,
@@ -110,8 +137,7 @@ class LiveFlow:
         scenario: str = "algorithm",
         group_min: int = DEFAULT_GROUP_MIN,
         coding_min: int = DEFAULT_CODING_MIN,
-        probe_max_turns: int = 8,
-        coding_max_turns: int = 5,
+        turn_budgets: Optional[dict[str, int]] = None,
     ):
         self.ctx = ctx
         self.lang = lang
@@ -121,45 +147,49 @@ class LiveFlow:
         self.group_min = int(group_min or DEFAULT_GROUP_MIN)
         self.coding_min = int(coding_min or DEFAULT_CODING_MIN)
         self.total_min = self.group_min + self.coding_min
-        # Turn-based safety caps: in a fast demo/test the interview must still reach
-        # coding + wrap (a real 40/20-min interview is bounded by time, not by these).
-        self.probe_max_turns = int(probe_max_turns or 8)
-        self.coding_max_turns = int(coding_max_turns or 5)
+        # Overridable per-state turn budgets (default above). Lets a fast test hit
+        # every state without waiting for real minutes.
+        self.turn_budgets = {**_STATE_TURN_BUDGET, **(turn_budgets or {})}
 
         self.turns: list[dict[str, str]] = []  # full chat history [{role, content}]
         self.started_at = time.monotonic()
-        self.phase_started_at = self.started_at
-        self.phase_index = 0  # index into _PHASES
+        self.state_started_at = self.started_at
+        self._state_index = 0  # index into STATES
+        self._state_entry_users = 0  # user-turn count at entry
         self.done = False
         self.coding_announced = False
         self.coding_elapsed_start: Optional[float] = None
         self._qseq = 0
-        self._phase_entry_users = 0  # user-turn count at which we entered current phase
         self._opened = False  # the opening self-intro has been spoken once
 
         self.ctx.status = "live"
         self.ctx.cursor = 0
 
-    # ---- phase helpers -----------------------------------------------------
-    def _ordered_phases(self) -> list[str]:
-        return [p for p in _PHASES if not (p == "coding" and not self.has_coding)]
+    # ---- state helpers -----------------------------------------------------
+    def _states(self) -> list[str]:
+        return [s for s in STATES if not (s == "coding" and not self.has_coding)]
 
     @property
-    def phase(self) -> str:
-        ordered = self._ordered_phases()
-        return ordered[self.phase_index] if self.phase_index < len(ordered) else "wrap"
+    def state(self) -> str:
+        ss = self._states()
+        return ss[self._state_index] if self._state_index < len(ss) else "wrap"
 
-    def _phase_budget_min(self, phase: str) -> int:
-        if phase == "coding":
-            return self.coding_min
-        if phase == "intro":
-            return 4
-        if phase == "project":
-            return 5
-        if phase == "wrap":
-            return 2
-        # probe gets the rest of the group budget
-        return max(2, self.group_min - 4 - 5)
+    # Backward-compat aliases used by main.py / voice_ws.py.
+    @property
+    def phase(self) -> str:
+        return self.state
+
+    def state_label(self) -> str:
+        return STATE_LABELS.get(self.state, self.state)
+
+    def current_phase(self) -> str:
+        return self.state
+
+    def section_for_ui(self) -> str:
+        return _STATE_SECTION.get(self.state, "technical")
+
+    def open_states(self) -> list[str]:
+        return self._states()
 
     def _elapsed_min(self) -> float:
         return (time.monotonic() - self.started_at) / 60.0
@@ -169,32 +199,29 @@ class LiveFlow:
             return (self.coding_elapsed_start - self.started_at) / 60.0
         return self._elapsed_min()
 
+    def _state_answer_count(self) -> int:
+        return self._user_count() - self._state_entry_users
+
+    def _user_count(self) -> int:
+        return sum(1 for t in self.turns if t.get("role") == "user")
+
     # ---- public API --------------------------------------------------------
     def opening_line(self) -> str:
         """First interviewer utterance: request a self-intro. Idempotent."""
         if self._opened:
             return self.turns[-1]["content"]
         self._opened = True
-        line = "你好，很高兴见到你。这是一场约 60 分钟的模拟面试——前 40 分钟我们聊你的项目、经历和基础，后 20 分钟做一道手撕代码题。先请你做个自我介绍吧，说说你的教育背景和最有代表性的项目或经历。"
+        line = (
+            "你好，很高兴见到你。这是一场模拟面试，我会按顺序问你几部分："
+            "先请你做自我介绍，再聊聊你的项目，然后我会就项目、你的能力和对这个岗位的看法深入聊，"
+            "最后我们做一道手撕代码题。现在我们开始吧，请你先做个简单的自我介绍，说说你的教育背景和最有代表性的经历。"
+        )
         self.turns.append({"role": "assistant", "content": line})
         return line
 
     @property
     def opened(self) -> bool:
         return self._opened
-
-    def current_phase(self) -> str:
-        return self.phase
-
-    def section_for_ui(self) -> str:
-        """Map live phase to the plan's section names used by the UI/CodingPanel.
-
-        The plan schema only allows {intro|behavioral|technical|coding|wrap}, so
-        'project' maps to 'behavioral' (project/experience profiling).
-        """
-        m = {"intro": "intro", "project": "behavioral", "probe": "technical",
-             "coding": "coding", "wrap": "wrap"}
-        return m.get(self.phase, "technical")
 
     def coding_problem_id(self) -> Optional[str]:
         """The plan's coding problem (if a coding round exists in the plan)."""
@@ -216,17 +243,15 @@ class LiveFlow:
         user_text = (candidate_text or "").strip() or "(未作答)"
         self.turns.append({"role": "user", "content": user_text})
 
-        # Record the candidate's answer + the question it answers (for scoring).
         self._record_answer(user_text)
 
-        # Ask the agent for the line in the CURRENT phase.
         line = self._ask_agent()
         if not line:
             line = self._fallback_line()
         self.turns.append({"role": "assistant", "content": line})
 
-        # Advance the director AFTER speaking, so a wrap-up line is generated first.
-        self._advance_phase()
+        # Advance the state machine AFTER speaking, so a farewell is spoken first.
+        self._advance_state()
 
         return line
 
@@ -245,7 +270,7 @@ class LiveFlow:
                 difficulty=3,
                 rubric=[RubricItem(point="depth", weight=1.0)],
                 followups=[],
-                target_competency=self.phase,
+                target_competency=self.state,
             ))
             self.ctx.answers.append(AnswerRecord(
                 question_id=qid,
@@ -264,30 +289,28 @@ class LiveFlow:
 
     def _ask_agent(self) -> str:
         """Build the full per-round prompt and ask the LLM for the next line."""
-        phase = self.phase
+        state = self.state
         elapsed = self._group_elapsed_min()
-        remaining = max(0.0, self.group_min - elapsed)
-        next_phase = self._next_phase_name()
+        remaining = max(0.0, self.group_min + self.coding_min - elapsed)
+        next_state = self._next_state_name()
         persona = _persona_line(getattr(self.ctx, "persona", "high-peer"))
         style = _persona_style(getattr(self.ctx, "persona", "high-peer"))
         memory = getattr(self.ctx, "memory_brief", "") or ""
 
         sys_ = (
-            f"你是一位正在主持真实技术面试的资深面试官。{persona} 面试风格：{style}\n"
-            "【面试结构】约60分钟：前40分钟聊项目/经历/基础，后20分钟手撕代码。\n"
-            f"【当前阶段】{phase}（下一阶段：{next_phase}）\n"
-            f"【时间预算】对话阶段已用约 {elapsed:.1f} 分钟，还剩约 {remaining:.1f} 分钟；"
-            f"代码阶段{self.coding_min}分钟。\n"
+            f"你是一位正在主持真实技术面试的资深面试官。{persona} 面试风格:{style}\n"
+            "【面试环节顺序】自我介绍 → 介绍项目 → 提问项目细节 → 提问其他能力/知识 → "
+            "提问对岗位的看法 → 手撕代码 → 收尾。\n"
+            f"【当前环节】{state}（下一环节：{next_state}）\n"
+            f"【时间预算】已用约 {elapsed:.1f} 分钟，还剩约 {remaining:.1f} 分钟。\n"
             f"【候选人简历】\n{_candidate_brief(self.ctx)}\n"
             f"【本场特点】\n{_requirements_brief(self.ctx, self.notes, self.scenario)}\n"
             f"{('【跨场记忆】' + memory) if memory else ''}\n"
             "【面试规则】\n"
             "- 用中文口语化地说一句话推进面试；只问一个问题，不要一次抛多个问题、不要报题号。\n"
             "- 根据候选人上一句的长短和深度调整：答得浅就追问细节，答得深就换一个点，时间少就加快。\n"
-            "- 经过自我介绍后，选一个具体项目让候选人介绍；然后在 probe 阶段深入追问该项目细节"
-            "（架构/难点/取舍/指标/踩坑），再自然过渡到该岗位相关的理论/基础。\n"
             "- 不要复述问题，不要提评分或打分，不要说'我记录了'。\n"
-            f"- 当前阶段是【{phase}】：{self._phase_guidance(phase, remaining)}\n"
+            f"- 当前环节是【{state}】，请严格按这个环节的要求提问：{self._state_guidance(state)}\n"
         )
         user = (
             "【到目前为止的完整对话】\n" + self._history_block() +
@@ -297,7 +320,7 @@ class LiveFlow:
             llm = LLM()
             line = llm.chat(
                 [{"role": "system", "content": sys_}, {"role": "user", "content": user}],
-                max_tokens=300,
+                max_tokens=320,
                 temperature=0.8,
                 timeout=45.0,
             )
@@ -307,109 +330,78 @@ class LiveFlow:
             logger.warning("liveflow _ask_agent failed: %s", exc)
             return ""
 
-    def _phase_guidance(self, phase: str, remaining: float) -> str:
-        if phase == "intro":
-            return "请让候选人自我介绍。这是面试开场，你的一句话要自然、有亲和力。"
-        if phase == "project":
-            return "听完自我介绍后，请让候选人挑一个最有代表性的具体项目来介绍。"
-        if phase == "probe":
-            return "这是主环节：围绕候选人刚介绍的项目追问细节（架构、难点、数据、取舍、踩坑），" \
-                   "再结合岗位要求问相关基础与场景。剩余时间不少时可多问几轮并逐层加深；" \
-                   "剩余时间少则挑最关键的一两点快速问。"
-        if phase == "coding":
-            return "请引导候选人进入手撕代码环节：说明题目并要求其先在代码区作答，你来观察与提示。"
-        if phase == "wrap":
-            return "请做收尾：感谢候选人，简要点出亮点与可改进处，并留时间让候选人反问。(你说完这句即结束)"
-        return ""
+    def _state_guidance(self, state: str) -> str:
+        return {
+            "intro": "面试开场。请让候选人做自我介绍，一句自然、有亲和力的话即可。",
+            "project": "听完自我介绍后，请让候选人挑一个最有代表性的具体项目来介绍。",
+            "project_qa": "这是主环节：围绕候选人刚介绍的项目深入提问（架构、难点、数据、取舍、踩坑），逐层加深。",
+            "knowledge": "项目问得差不多了，转向该岗位需要的基础/专业知识/软实力提问（结合岗位要求与候选人的薄弱点）。",
+            "role": "请问候选人关于这个岗位/公司的问题，例如为什么想来、对岗位的理解、职业规划、能否接受某类工作节奏。",
+            "coding": "进入手撕代码环节：简述题目，引导候选人先讲思路，再要求其在代码区作答，你负责观察与提示。",
+            "wrap": "做收尾：感谢候选人，简要点出亮点与可改进处，并留时间让候选人反问。（你说完这句即结束）",
+        }.get(state, "请自然、专业地推进面试。")
 
-    def _next_phase_name(self) -> str:
-        ordered = self._ordered_phases()
-        idx = self.phase_index if self.phase_index < len(ordered) else len(ordered) - 1
-        return ordered[idx + 1] if idx + 1 < len(ordered) else "wrap"
+    def _next_state_name(self) -> str:
+        ss = self._states()
+        idx = self._state_index if self._state_index < len(ss) else len(ss) - 1
+        return ss[idx + 1] if idx + 1 < len(ss) else "wrap"
 
-    def _advance_phase(self) -> None:
-        """Deterministic phase director.
+    # ---- state machine -----------------------------------------------------
+    def _advance_state(self) -> None:
+        """Advance the state machine by per-state turn budget (deterministic).
 
-        - Hard time cap: if the whole group budget is consumed and we are not yet
-          in coding/wrap, force the move so the interview is never late.
-        - Turn-based caps: probe exits after ``probe_max_turns`` answers and coding
-          after ``coding_max_turns`` answers (a fast demo/test still reaches the
-          hand-code round + wrap without waiting a real 40/20 minutes).
-        - intro -> project -> probe each advance after their first answer.
-        - `done` is set only when leaving wrap, so the wrap-up line is spoken first.
+        A hard time cap is the safety net so a real 40/20-min interview is never
+        late; the turn budgets let a fast test/demo reach (and verify) every state.
         """
-        ordered = self._ordered_phases()
-        idx = self.phase_index if self.phase_index < len(ordered) else len(ordered) - 1
-        cur = ordered[idx]
+        ss = self._states()
+        idx = self._state_index if self._state_index < len(ss) else len(ss) - 1
+        cur = ss[idx]
 
-        # (0) If the interview is already wrapped up, never re-enter.
         if self.done:
             return
 
-        # (1) Hard group time cap -> push toward coding / wrap.
-        if cur in ("intro", "project", "probe") and self._group_elapsed_min() >= self.group_min:
-            self._enter_phase(ordered, min(idx + 1, len(ordered) - 1))
+        # Hard group time cap -> push forward (safety net for a real long interview).
+        if cur != "coding" and cur != "wrap" and self._group_elapsed_min() >= self.group_min:
+            self._enter_state(ss, min(idx + 1, len(ss) - 1))
             return
 
-        # (2) Coding phase: advance to wrap after the coding budget (time *or* turns).
+        # Coding advances by budget OR by time (whichever comes first).
         if cur == "coding":
             time_up = (
                 self.coding_elapsed_start is not None
                 and (time.monotonic() - self.coding_elapsed_start) / 60.0 >= self.coding_min
             )
-            turns_up = self._phase_answer_count() >= self.coding_max_turns
-            if time_up or turns_up:
-                self._enter_phase(ordered, min(idx + 1, len(ordered) - 1))
-                if self.phase == "wrap":
-                    # We just entered wrap; it will be spoken on the NEXT next_line.
-                    pass
+            if time_up or self._state_answer_count() >= self.turn_budgets.get(cur, 1):
+                self._enter_state(ss, min(idx + 1, len(ss) - 1))
             return
 
-        # (3) Probe: stay for a bounded number of answers (turn cap) or time cap.
-        if cur == "probe":
-            if self._phase_answer_count() >= self.probe_max_turns:
-                self._enter_phase(ordered, min(idx + 1, len(ordered) - 1))
-                if self.phase == "coding" and not self.coding_announced:
-                    self.coding_announced = True
-                    self.coding_elapsed_start = time.monotonic()
-            return
-
-        # (4) Short-lived phases advance after their first answer; wrapping marks done.
-        budget = {"intro": 1, "project": 1, "wrap": 1}
-        if cur in budget and self._phase_answer_count() >= budget[cur]:
+        # Deterministic turn budget for this state.
+        if self._state_answer_count() >= self.turn_budgets.get(cur, 1):
             if cur == "wrap":
-                # Spoke the farewell already -> the interview is over.
                 self.done = True
                 return
-            self._enter_phase(ordered, min(idx + 1, len(ordered) - 1))
+            self._enter_state(ss, min(idx + 1, len(ss) - 1))
 
-    def _phase_answer_count(self) -> int:
-        """Number of candidate answers recorded in the CURRENT phase (since entry)."""
-        return self._phase_user_count() - self._phase_entry_users
-
-    def _enter_phase(self, ordered: list[str], new_index: int) -> None:
-        if new_index == self.phase_index:
+    def _enter_state(self, ss: list[str], new_index: int) -> None:
+        if new_index == self._state_index:
             return
-        self.phase_index = new_index
-        self.phase_started_at = time.monotonic()
-        self._phase_entry_users = self._phase_user_count()
-        # Entering coding starts the coding timer (so time cap applies).
-        if self.phase == "coding" and not self.coding_announced:
+        self._state_index = new_index
+        self.state_started_at = time.monotonic()
+        self._state_entry_users = self._user_count()
+        if self.state == "coding" and not self.coding_announced:
             self.coding_announced = True
             self.coding_elapsed_start = time.monotonic()
 
-    def _phase_user_count(self) -> int:
-        return sum(1 for t in self.turns if t.get("role") == "user")
-
     def _fallback_line(self) -> str:
-        by_phase = {
+        return {
             "intro": "请先做个自我介绍吧。",
             "project": "可以说说你最有代表性的一个项目吗？",
-            "probe": "这个项目里你遇到了哪些难点，是怎么解决的？",
-            "coding": "我们进入手撕代码环节，请看一下题目并在左侧代码区作答。",
+            "project_qa": "这个项目里你遇到了哪些难点，是怎么解决的？",
+            "knowledge": "结合这类岗位，你还需要补哪些底子？说说你最熟的一块。",
+            "role": "你为什么想来这个岗位/公司？",
+            "coding": "我们进入手撕代码环节，请看题目并在代码区作答。",
             "wrap": "感谢你的回答，可以看看你的面试报告。",
-        }
-        return by_phase.get(self.phase, "请继续。")
+        }.get(self.state, "请继续。")
 
 
 def make_flow(ctx: InterviewContext, **kw) -> LiveFlow:

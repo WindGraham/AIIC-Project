@@ -319,6 +319,34 @@ class ResumeIn(BaseModel):
     is_default: bool = False
 
 
+@app.post("/api/parse/resume")
+async def parse_resume(req: dict):
+    """Decode an uploaded resume file (pdf/docx/md/txt/xlsx) to plain text.
+
+    The browser sends the file bytes as base64 (single in-memory request), the
+    agent decodes them offline and returns the extracted text so the web page can
+    populate the resume_text field. No LLM call involved.
+    """
+    import base64 as _b64
+
+    b64 = str(req.get("data", ""))
+    filename = str(req.get("filename", ""))
+    if not b64:
+        raise HTTPException(400, "no file data")
+    try:
+        raw = _b64.b64decode(b64, validate=True)
+    except Exception:  # noqa: BLE001
+        raise HTTPException(400, "invalid base64 payload")
+    if len(raw) > 20 * 1024 * 1024:  # 20 MB cap
+        raise HTTPException(413, "file too large (max 20 MB)")
+    from .resume_parse import decode_resume  # noqa: PLC0415
+
+    result = decode_resume(raw, filename)
+    if result["error"]:
+        logger.warning("parse/resume error: %s", result["error"])
+    return {"text": result["text"], "format": result["format"], "error": result["error"]}
+
+
 @app.get("/api/resumes")
 def list_resumes(user: dict = Depends(_auth_user)):
     return get_store().list_resumes(user["id"])
@@ -447,6 +475,8 @@ def next_question(interview_id: str, user: Optional[dict] = Depends(_optional_us
         "done": flow.done,
         "section": flow.section_for_ui(),
         "phase": flow.phase,
+        "state": flow.state,
+        "state_label": flow.state_label(),
         "liveflow": True,
     }
 
@@ -461,14 +491,14 @@ def answer(interview_id: str, req: dict, user: dict = Depends(_auth_user)):
         # No text yet: (re)seed the opening question.
         opening = flow.opening_line()
         return {"next_question": opening, "done": flow.done, "section": flow.section_for_ui(),
-                "phase": flow.phase}
+                "phase": flow.phase, "state": flow.state, "state_label": flow.state_label()}
     if not flow.opened:
         # The candidate answered before the agent spoke (defensive): open first,
         # then treat the text as this first answer.
         flow.opening_line()
     nxt = flow.next_line(txt)
     return {"next_question": nxt, "done": flow.done, "section": flow.section_for_ui(),
-            "phase": flow.phase}
+            "phase": flow.phase, "state": flow.state, "state_label": flow.state_label()}
 
 
 @app.get("/api/interviews/{interview_id}/report")

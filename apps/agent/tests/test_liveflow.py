@@ -1,16 +1,15 @@
-"""Tests for the per-round live interviewer flow (liveflow.LiveFlow).
+"""Tests for the interview STATE MACHINE (liveflow.LiveFlow).
 
-Verifies the DIRECTOR determinism (the phase ladder and time/turn budgets) WITHOUT
-needing a real LLM: we monkeypatch LiveFlow._ask_agent to return canned lines, so
-we can assert the phase transitions and that each round records an answer + a
-PlannedQuestion for scoring. A separate test exercises the real prompt-building
+Verifies the state-machine determinism WITHOUT needing a real LLM: we monkeypatch
+LiveFlow._ask_agent to return canned lines, so we can assert the state ladder
+intro -> project -> project_qa -> knowledge -> role -> coding -> wrap -> done, that
+each state advances by its turn budget, and that each round records an answer + a
+PlannedQuestion for scoring. A separate test exercises the prompt-building
 (identity/resume/requirements/full-history) as string content rather than a live
 network call.
 """
 
 from __future__ import annotations
-
-import datetime
 
 from agent.contracts import (
     CandidateProfile,
@@ -24,12 +23,13 @@ from agent.contracts import (
     Scorecard,
     CodingTendency,
 )
-from agent.liveflow import LiveFlow
+from agent.liveflow import LiveFlow, STATES
 
 
 def _make_ctx(has_coding: bool = True) -> InterviewContext:
+    sections = ["intro", "behavioral", "technical", "coding", "wrap"] if has_coding else ["intro", "behavioral", "technical", "wrap"]
     plan = QuestionPlan(
-        sections_order=["intro", "project", "technical", "coding", "wrap"] if has_coding else ["intro", "project", "technical", "wrap"],
+        sections_order=sections,
         questions=[
             PlannedQuestion(id="q0", section="intro", text="请自我介绍", difficulty=1,
                             rubric=[], followups=[], target_competency="intro"),
@@ -63,87 +63,91 @@ def test_opening_line_requests_self_intro():
     line = flow.opening_line()
     assert "自我介绍" in line
     assert len(flow.turns) == 1
-    assert flow.turns[0]["role"] == "assistant"
-    assert flow.phase == "intro"
+    assert flow.state == "intro"
 
 
-def test_phase_ladder_reaches_coding_then_wrap(monkeypatch):
-    """The director should move intro -> project -> probe -> coding -> wrap, and
-    the per-round agent output is whatever the (mocked) LLM says."""
+def test_state_machine_reaches_every_state_then_done(monkeypatch):
+    """With turn budgets of 1, the machine walks each state and finishes."""
     ctx = _make_ctx(has_coding=True)
-    flow = LiveFlow(ctx, probe_max_turns=2, coding_max_turns=1)
-    calls = {"n": 0}
+    budgets = {s: 1 for s in STATES}
+    flow = LiveFlow(ctx, turn_budgets=budgets)
 
     def fake_ask(_self):
-        calls["n"] += 1
         return {
-            "intro": "请先自我介绍。",
+            "intro": "请自我介绍。",
             "project": "请介绍项目A。",
-            "probe": "这个项目有什么难点？",
+            "project_qa": "项目有什么难点？",
+            "knowledge": "你熟悉什么基础/知识？",
+            "role": "你为什么想来这个岗位？",
             "coding": "请开始写代码。",
             "wrap": "感谢，再见。",
-        }[flow.phase]
+        }[flow.state]
 
     monkeypatch.setattr(LiveFlow, "_ask_agent", fake_ask)
     flow.opening_line()
-
-    # Turn 1 (answer intro) -> project
-    line1 = flow.next_line("我叫张三，毕业于XX大学。")
-    assert flow.phase == "project"
-
-    # Turn 2 (answer project) -> probe
-    line2 = flow.next_line("我做过项目A，负责后端。")
-    assert flow.phase == "probe"
-
-    # probe_max_turns=2 so after 2 probe answers -> coding
-    flow.next_line("项目难点是性能优化。")
-    assert flow.phase == "probe"
-    flow.next_line("我用了缓存。")
-    assert flow.phase == "coding"
-    assert flow.coding_announced
-
-    # coding_max_turns=1 so one coding answer -> wrap (not done until wrap spoken)
-    flow.next_line("代码思路是这样。")
-    assert flow.phase == "wrap"
-    assert not flow.done, "done must not fire until the wrap line is spoken"
-
-    # wrap gets spoken; after it, done fires
-    wrap_line = flow.next_line("谢谢面试官。")
+    visited = []
+    for _ in range(20):
+        flow.next_line("这是我的回答。")
+        visited.append(flow.state if not flow.done else None)
+        if flow.done:
+            break
+    # We must pass through every state (a deterministic ladder).
+    assert "project" in visited
+    assert "project_qa" in visited
+    assert "knowledge" in visited
+    assert "role" in visited
+    assert "coding" in visited
+    assert None in visited  # ended
     assert flow.done
-    assert wrap_line == "感谢，再见。"
 
 
-def test_no_coding_skips_to_wrap(monkeypatch):
+def test_no_coding_skips_to_wrap_and_never_enters_coding(monkeypatch):
     ctx = _make_ctx(has_coding=False)
-    flow = LiveFlow(ctx)
+    budgets = {s: 1 for s in STATES}
+    flow = LiveFlow(ctx, has_coding=False, turn_budgets=budgets)
 
-    def fake_ask(_self):
-        return "好的，请继续。"
-
-    monkeypatch.setattr(LiveFlow, "_ask_agent", fake_ask)
+    monkeypatch.setattr(LiveFlow, "_ask_agent", lambda _self: "好的，请继续。")
     flow.opening_line()
-    # After intro+project answers, we should reach probe (not coding).
-    flow.next_line("我叫张三。")
-    flow.next_line("我做过项目A。")
-    # Even after many turns we never hit coding.
-    for _ in range(3):
-        flow.next_line("细节。")
-    assert "coding" not in [flow.phase]
+    visited = []
+    for _ in range(12):
+        flow.next_line("回答。")
+        visited.append(flow.state)
+        if flow.done:
+            break
+    assert "coding" not in visited
+    assert "wrap" in visited
+    assert flow.done
+
+
+def test_larger_budget_keeps_state_until_answered_enough(monkeypatch):
+    # project_qa budget=3: the state stays project_qa until 3 answers are given.
+    ctx = _make_ctx()
+    budgets = {s: 1 for s in STATES}
+    budgets["project_qa"] = 3
+    flow = LiveFlow(ctx, turn_budgets=budgets)
+    monkeypatch.setattr(LiveFlow, "_ask_agent", lambda _self: "追问。")
+
+    flow.opening_line()
+    flow.next_line("答1")  # -> project
+    flow.next_line("答2")  # -> project_qa
+    assert flow.state == "project_qa"
+    flow.next_line("答3")  # project_qa answer 1
+    assert flow.state == "project_qa"
+    flow.next_line("答4")  # project_qa answer 2
+    assert flow.state == "project_qa"
+    flow.next_line("答5")  # project_qa answer 3 -> advances
+    assert flow.state != "project_qa"
 
 
 def test_each_round_records_answer_and_question_for_scoring(monkeypatch):
     ctx = _make_ctx()
-    flow = LiveFlow(ctx)
+    flow = LiveFlow(ctx, turn_budgets={s: 1 for s in STATES})
+    monkeypatch.setattr(LiveFlow, "_ask_agent", lambda _self: "这是问题。")
 
-    def fake_ask(_self):
-        return "这是问题。"
-
-    monkeypatch.setattr(LiveFlow, "_ask_agent", fake_ask)
     flow.opening_line()
     before_q = len(ctx.plan.questions)
     before_a = len(ctx.answers)
     flow.next_line("这是回答。")
-    # The flow appends a new PlannedQuestion + an AnswerRecord for scoring.
     assert len(ctx.plan.questions) == before_q + 1
     assert len(ctx.answers) == before_a + 1
     assert ctx.answers[-1].transcript == "这是回答。"
@@ -161,8 +165,6 @@ def test_prompt_contains_identity_resume_requirements_and_history(monkeypatch):
         captured["user"] = messages[1]["content"]
         return "继续。"
 
-    flow.next_line = flow.next_line  # no-op
-    # Call the real _ask_agent but stub the LLM.chat used inside it.
     import agent.liveflow as lf
     monkeypatch.setattr(lf, "LLM", lambda: type("L", (), {"chat": fake_chat, "chat_json": lambda *a, **k: {}})())
 
@@ -170,11 +172,7 @@ def test_prompt_contains_identity_resume_requirements_and_history(monkeypatch):
     line = flow._ask_agent()
     assert line == "继续。"
     sys = captured["system"]
-    # identity / persona
-    assert "资深" in sys or "面试官" in sys
-    # resume
-    assert "张三" in sys and "后端开发" in sys
-    # requirements
-    assert "字节" in sys and "重点考察算法" in sys
-    # full history
+    assert "面试官" in sys  # identity
+    assert "张三" in sys and "后端开发" in sys  # resume
+    assert "字节" in sys and "重点考察算法" in sys  # requirements
     assert "我叫张三" in captured["user"] and "请自我介绍" in (captured["user"] or "")
