@@ -190,3 +190,32 @@ def test_prompt_contains_identity_resume_requirements_and_history(monkeypatch):
     assert "张三" in sys and "后端开发" in sys  # resume
     assert "字节" in sys and "重点考察算法" in sys  # requirements
     assert "我叫张三" in captured["user"] and "请自我介绍" in (captured["user"] or "")
+    # Conversational-first guardrails: the agent must react to the candidate's last
+    # message and must not be script-locked to a stage template.
+    assert "直接回应候选人刚说的那句话" in sys
+    assert "看着候选人最后一句回答" in captured["user"]
+    assert "严格按这个环节的要求" not in sys
+
+
+def test_prompt_includes_the_candidates_last_answer(monkeypatch):
+    """The per-round prompt's user section must contain the candidate's latest
+    message so the agent can react to it (not just the stage)."""
+    ctx = _make_ctx()
+    flow = LiveFlow(ctx, turn_budgets={s: 1 for s in STATES})
+    captured: dict = {}
+
+    def fake_chat(self, messages, **kwargs):
+        captured["system"] = messages[0]["content"]
+        captured["user"] = messages[1]["content"]
+        return "继续。"
+
+    import agent.liveflow as lf
+    monkeypatch.setattr(lf, "LLM", lambda: type("L", (), {"chat": fake_chat, "chat_json": lambda *a, **k: {}})())
+
+    flow.turns = [
+        {"role": "assistant", "content": "请介绍你的项目。"},
+        {"role": "user", "content": "我用RocketMQ事务消息解决订单一致性"},
+    ]
+    flow._ask_agent()
+    # The candidate's exact words must appear in the prompt so the LLM can respond to them.
+    assert "RocketMQ事务消息" in captured["user"]
