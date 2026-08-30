@@ -268,7 +268,8 @@ class VoiceSession:
                 if kind == "audio" and payload:
                     self._on_audio(payload)
                 elif kind == "start":
-                    self._begin_turn()
+                    # The candidate is ready: open the call by speaking the opening.
+                    asyncio.create_task(self._maybe_announce_question())
                 elif kind == "stop":
                     self._end_turn()
                 elif kind == "interrupt":
@@ -288,10 +289,6 @@ class VoiceSession:
         self._processing = False
         self._barging = False
         self.turn_task = asyncio.create_task(self._turn_worker(q))
-        # First turn of the interview: the AI should OPEN the call by speaking the
-        # current question (so the candidate hears "请介绍你自己" etc.), not wait to
-        # be spoken to. Future turns follow-up naturally inside _run_turn.
-        asyncio.create_task(self._maybe_announce_question())
 
     async def _maybe_announce_question(self) -> None:
         """If the interview has no answers yet, speak the opening question.
@@ -359,8 +356,11 @@ class VoiceSession:
         if self.playback_active:
             self._barging = True
             self._begin_turn()  # cancels playback, opens a fresh candidate turn
-        elif self.queue is None:
+        if self.queue is None:
             self._begin_turn()
+            # The candidate started talking before we announced (or without `start`):
+            # make sure the opening is spoken at most once, in parallel.
+            asyncio.create_task(self._maybe_announce_question())
         if self.queue is not None and self.turn_task is not None and not self.turn_task.done():
             self.queue.put_nowait(frame)
 
