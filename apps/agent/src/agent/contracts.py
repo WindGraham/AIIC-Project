@@ -154,3 +154,5 @@ class InterviewContext(BaseModel):
     answers: list[AnswerRecord] = []
     scorecard: Scorecard
     status: str = Field("prep", pattern="^(prep|live|post|complete)$")
+    persona: str = Field("high-peer", pattern="^(peer|high-peer|manager)$")  # C1
+    memory_brief: str = ""  # C2 cross-field memory hint used at prep time

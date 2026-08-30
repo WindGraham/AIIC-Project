@@ -85,6 +85,35 @@ def _put_context(iid: str, ctx: InterviewContext) -> None:
     _CONTEXTS[iid] = ctx
 
 
+def _history_brief(user_id: str, position: str, limit: int = 6) -> str:
+    """C2 cross-field memory: a short brief of the user's past weak points so the
+    next interviewer plan targets them (the 'learning curve' signal). Empty if none."""
+    try:
+        reports = get_store().list_reports(user_id, limit=limit)
+    except Exception:
+        return ""
+    if not reports:
+        return ""
+    lines = []
+    # most recent weak competencies (low scores) + missing slots
+    weak: list[str] = []
+    slots: list[str] = []
+    for r in reports:
+        for it in r.get("items", []):
+            if float(it.get("score", 5)) < 3 and it.get("competency") not in weak:
+                weak.append(it.get("competency", ""))
+        for m in r.get("missing", []):
+            if m.get("slot") and m.get("slot") not in slots:
+                slots.append(m.get("slot", ""))
+    if weak:
+        lines.append("过去薄弱项：" + "、".join(x for x in weak[:4] if x))
+    if slots:
+        lines.append("上次追问未答好：" + "、".join(x for x in slots[:4] if x))
+    if not lines:
+        return ""
+    return "（跨场记忆）" + "；".join(lines) + "。请在本场更有针对性地考察并引导这些点。"
+
+
 @app.on_event("startup")
 def _startup():
     """Opportunistic hygiene on boot: drop expired sessions."""
@@ -103,6 +132,14 @@ def _auth_user(authorization: str = Header(default="")) -> dict[str, Any]:
     if user is None:
         raise HTTPException(401, "not authenticated")
     return user
+
+
+def _optional_user(authorization: str = Header(default="")) -> Optional[dict[str, Any]]:
+    """Like _auth_user but returns None when unauthenticated (never raises)."""
+    token = ""
+    if authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+    return get_store().user_for_session(token) if token else None
 
 
 @app.get("/health")
@@ -167,7 +204,8 @@ def start_interview(booking_id: str, user: dict = Depends(_auth_user)):
         try:
             persona_inner = b.get("persona", "high-peer") if b.get("persona") in PERSONA_LEVELS else "high-peer"
             ctx = build_plan(b.get("resume_text", ""), b.get("jd_text", ""), b.get("company", ""),
-                             b.get("position", ""), "mid", "zh", persona=persona_inner)
+                             b.get("position", ""), "mid", "zh", persona=persona_inner,
+                             memory_brief=_history_brief(user["id"], b.get("position", "")))
             _put_context(iid, ctx)
         except Exception as exc:  # noqa: BLE001
             logger.exception("prep failed for %s: %s", booking_id, exc)
@@ -340,11 +378,11 @@ def answer(interview_id: str, req: dict):
 
 
 @app.get("/api/interviews/{interview_id}/report")
-def report(interview_id: str):
+def report(interview_id: str, user: Optional[dict] = Depends(_optional_user)):
     ctx = _require_ctx(interview_id)
     sc = finalize(ctx)
     os_ = sc.interviewer_os
-    return {
+    result = {
         "overall": sc.overall,
         "items": [s.model_dump() for s in sc.items],
         "summary": sc.summary,
@@ -356,6 +394,26 @@ def report(interview_id: str):
                               for m in os_.missing_slots],
         },
     }
+    # C2: persist the result so future interviews reuse the weak points.
+    if user is not None:
+        try:
+            get_store().save_report(
+                user["id"], interview_id,
+                position=ctx.job.position, company=ctx.job.company, persona=getattr(ctx, "persona", "high-peer"),
+                overall=sc.overall,
+                items=[s.model_dump() for s in sc.items],
+                missing=[{"slot": m.slot, "why_it_matters": m.why_it_matters,
+                          "one_line_advice": m.one_line_advice} for m in os_.missing_slots],
+            )
+        except Exception:
+            pass
+    return result
+
+
+@app.get("/api/interviews/history")
+def history(user: dict = Depends(_auth_user)):
+    """Cross-field memory: past interview results for the learning curve (C2)."""
+    return get_store().list_reports(user["id"])
 
 
 # ---------------------------------------------------------------------------

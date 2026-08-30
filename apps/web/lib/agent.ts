@@ -134,6 +134,14 @@ export async function bookInterview(body: Partial<Booking>): Promise<Booking> {
   return call("/api/interviews/book", { method: "POST", body: JSON.stringify(body) });
 }
 
+export async function getHistory(): Promise<any[]> {
+  try {
+    return await call("/api/interviews/history");
+  } catch {
+    return [];
+  }
+}
+
 export async function startBooking(bookingId: string): Promise<{ interview_id: string; question: string; plan: any }> {
   return call(`/api/interviews/${bookingId}/start`, { method: "POST" });
 }

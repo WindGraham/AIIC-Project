@@ -68,9 +68,23 @@ CREATE TABLE IF NOT EXISTS bookings (
     persona     TEXT NOT NULL DEFAULT 'high-peer',
     created_at  TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS reports (
+    id            TEXT PRIMARY KEY,
+    user_id       TEXT NOT NULL,
+    interview_id  TEXT NOT NULL,
+    position      TEXT NOT NULL DEFAULT '',
+    company       TEXT NOT NULL DEFAULT '',
+    persona       TEXT NOT NULL DEFAULT 'high-peer',
+    overall       REAL NOT NULL DEFAULT 0,
+    items_json    TEXT NOT NULL DEFAULT '[]',   -- [{competency,score,evidence,level}]
+    missing_json  TEXT NOT NULL DEFAULT '[]',   -- [{slot,why_it_matters,one_line_advice}]
+    created_at    TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_resumes_user ON resumes(user_id);
 CREATE INDEX IF NOT EXISTS idx_bookings_user ON bookings(user_id);
+CREATE INDEX IF NOT EXISTS idx_reports_user ON reports(user_id);
+CREATE INDEX IF NOT EXISTS idx_reports_interview ON reports(interview_id);
 """
 
 PERSONA_LEVELS = ("peer", "high-peer", "manager")
@@ -298,6 +312,49 @@ class Store:
             "persona": b["persona"],
             "created_at": b["created_at"],
         }
+
+    # -- reports (cross-field memory / learning curve) ------------------------
+    def save_report(self, user_id: str, interview_id: str, *, position: str, company: str,
+                    persona: str, overall: float, items: list[dict], missing: list[dict]) -> None:
+        """Persist a finished interview result (C2: cross-field memory)."""
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO reports(id, user_id, interview_id, position, company, persona, "
+                "overall, items_json, missing_json, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (str(uuid.uuid4()), user_id, interview_id, position or "", company or "",
+                 persona or "high-peer", float(overall or 0),
+                 json.dumps(items, ensure_ascii=False), json.dumps(missing, ensure_ascii=False),
+                 self._now().isoformat()),
+            )
+
+    def list_reports(self, user_id: str, limit: int = 30) -> list[dict[str, Any]]:
+        """Past interview results, newest first (drives learning-curve trends)."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM reports WHERE user_id=? ORDER BY created_at DESC LIMIT ?", (user_id, limit)
+            ).fetchall()
+        out = []
+        for r in rows:
+            try:
+                items = json.loads(r["items_json"])
+            except Exception:
+                items = []
+            try:
+                missing = json.loads(r["missing_json"])
+            except Exception:
+                missing = []
+            out.append({
+                "id": r["id"],
+                "interview_id": r["interview_id"],
+                "position": r["position"],
+                "company": r["company"],
+                "persona": r["persona"],
+                "overall": r["overall"],
+                "items": items,
+                "missing": missing,
+                "created_at": r["created_at"],
+            })
+        return out
 
 
 # --- module-level singleton (settings-driven) --------------------------------

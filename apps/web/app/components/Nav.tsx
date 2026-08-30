@@ -33,6 +33,7 @@ export default function Nav({ me }: { me: Me }) {
     { href: "/resumes", label: "管理简历" },
     { href: "/booking", label: "预约面试" },
     { href: "/interviews", label: "面试列表" },
+    { href: "/history", label: "学习曲线" },
     { href: "/self-test", label: "功能测试" },
   ];
 

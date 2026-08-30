@@ -50,6 +50,63 @@ def _load_problems() -> list[dict]:
     return _PROBLEMS
 
 
+# (C3) position/tech keywords -> LeetCode topic slugs used for job-matched problem selection.
+_KEYWORD_TOPICS = {
+    "binary": "binary-search",
+    "sorted": "binary-search",
+    "search": "binary-search",
+    "array": "array",
+    "matrix": "array",
+    "string": "string",
+    "链表": "linked-list",
+    "link": "linked-list",
+    "list": "linked-list",
+    "tree": "tree",
+    "二叉": "binary-tree",
+    "graph": "graph",
+    "bfs": "breadth-first-search",
+    "dfs": "depth-first-search",
+    "深度": "depth-first-search",
+    "广度": "breadth-first-search",
+    "dp": "dynamic-programming",
+    "dynamic": "dynamic-programming",
+    "动态规划": "dynamic-programming",
+    "hash": "hash-table",
+    "map": "hash-table",
+    "排序": "sorting",
+    "stack": "stack",
+    "queue": "queue",
+    "heap": "heap",
+    "窗口": "sliding-window",
+    "sliding": "sliding-window",
+    "two": "two-pointers",
+    "双指针": "two-pointers",
+    "greedy": "greedy",
+    "贪心": "greedy",
+    "bit": "bit-manipulation",
+    "math": "math",
+    "backtrack": "backtracking",
+    "回": "backtracking",
+    "trie": "trie",
+    "prefix": "prefix-sum",
+    "monst": "monotonic-stack",
+    "union": "union-find",
+    "topo": "topological-sort",
+    "design": "design",
+}
+
+
+def _problem_topics(job: JobSpec) -> list[str]:
+    """Derive candidate problem topics from the job's position + tech stack (C3)."""
+    signals = " ".join([job.position, *job.tech_stack, *job.must_have])
+    low = signals.lower()
+    topics: list[str] = []
+    for kw, topic in _KEYWORD_TOPICS.items():
+        if kw.lower() in low and topic not in topics:
+            topics.append(topic)
+    return topics[:6]
+
+
 def pick_problem(topics: list[str] | None = None) -> dict | None:
     probs = _load_problems()
     if not probs:
@@ -192,14 +249,15 @@ def _persona_style(persona: str) -> str:
     return table.get(p, table["high-peer"])
 
 
-def _build_plan(llm: LLM, job: JobSpec, gap: GapAnalysis, company: CompanyIntel, lang: str, position: str, persona: str = "high-peer") -> QuestionPlan:
+def _build_plan(llm: LLM, job: JobSpec, gap: GapAnalysis, company: CompanyIntel, lang: str, position: str, persona: str = "high-peer", memory_brief: str = "") -> QuestionPlan:
     style = _persona_style(persona)
+    memory = ("Previous-session weak points to retest: " + memory_brief) if memory_brief else ""
     sys_ = ("You are a senior interviewer writing a mock-interview plan. Given the job/gap/company, produce 8-12 "
             "questions across sections in this order: intro, behavioral, technical, coding, wrap. Difficulty rises "
             "1->5. Each question: {id,section,text,question,difficulty(1-5),rubric[{point,weight,weights sum to 1}],"
             "followups[],target_competency}. Coding section: include exactly one question with target_competency "
             "'hand-code'. Return ONLY JSON matching {sections_order[],questions[]}.\n"
-            f"INTERVIEWER PERSONA: {style}")
+            f"INTERVIEWER PERSONA: {style}\n{memory}")
     user = (f"Position: {job.position} ({job.seniority}) @ {job.company}\n"
             f"Must-have: {job.must_have}\nNice-to-have: {job.nice_to_have}\n"
             f"Tech stack: {job.tech_stack}\nStrengths: {gap.strengths} Gaps: {gap.gaps} "
@@ -246,7 +304,7 @@ def _fallback_plan(position: str) -> QuestionPlan:
 
 
 def build_plan(resume_text: str, jd_text: str, company: str, position: str, seniority: str,
-               lang: str = "zh", persona: str = "high-peer") -> InterviewContext:
+               lang: str = "zh", persona: str = "high-peer", memory_brief: str = "") -> InterviewContext:
     llm = LLM()
     position = position or "软件工程师"
     seniority = _enum(seniority, {"junior", "mid", "senior", "staff"}, "mid")
@@ -273,17 +331,18 @@ def build_plan(resume_text: str, jd_text: str, company: str, position: str, seni
         gap = GapAnalysis(strengths=candidate.skills, gaps=[], probe_targets=candidate.projects[:2] or [], missing_skills=[])
 
     try:
-        plan = _build_plan(llm, job, gap, company_intel, lang, position, persona)
+        plan = _build_plan(llm, job, gap, company_intel, lang, position, persona, memory_brief)
     except Exception:
         plan = _fallback_plan(position)
 
     for q in plan.questions:
         if q.section == "coding" and not q.problem_id:
-            prob = pick_problem(job.tech_stack or [])
+            prob = pick_problem(_problem_topics(job) or (job.tech_stack or []))
             if prob:
                 q.problem_id = prob.get("title_slug")
 
     scorecard = Scorecard(overall=0, items=[], summary="", next_steps=[], model_answers=[],
                           interviewer_os=InterviewerOS(hidden_concern="", why_this_question=[], missing_slots=[], risk_level="low"))
     return InterviewContext(candidate=candidate, job=job, company=company_intel, gap=gap,
-                            plan=plan, cursor=0, answers=[], scorecard=scorecard, status="prep")
+                            plan=plan, cursor=0, answers=[], scorecard=scorecard, status="prep",
+                            persona=persona, memory_brief=memory_brief)
