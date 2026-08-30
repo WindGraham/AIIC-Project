@@ -617,6 +617,68 @@ def history(user: dict = Depends(_auth_user)):
     return get_store().list_reports(user["id"])
 
 
+@app.post("/api/interviews/{interview_id}/screen-note")
+def screen_note(interview_id: str, req: dict, user: dict = Depends(_auth_user)):
+    """Candidate 开摄像头/共享屏时，前端把 Gemini 读到的屏幕文本实时喂给 agent。
+
+    Stored on the LiveFlow's `screen_note` and included in the per-round agent prompt
+    as a '看屏幕' 旁注, so the interviewer can react to what's on the screen.
+    """
+    _check_owner(interview_id, user)
+    flow = _flow_for(interview_id)
+    text = str(req.get("text", "")).strip()
+    if text:
+        # Cap the note so it stays a concise context hint, not the transcript.
+        flow.screen_note = text[:1000]
+    return {"ok": True}
+
+
+RECORDINGS_DIR = Path(get_settings().data_dir) / "recordings"
+
+
+@app.post("/api/interviews/{interview_id}/save-transcript")
+def save_interview_transcript(interview_id: str, req: dict, user: dict = Depends(_auth_user)):
+    """Persist the full conversation transcript (user voice→text, agent reply) for an
+    interview. 前端在面试中对每一轮实时上报，保证"全部交互数据"落库。"""
+    _check_owner(interview_id, user)
+    ctx = _require_ctx(interview_id)
+    items = req.get("items") if isinstance(req.get("items"), list) else []
+    transcript = [{"role": str(it.get("role", "")), "text": str(it.get("text", "")),
+                   "ts": str(it.get("ts", ""))} for it in items if isinstance(it, dict)]
+    get_store().save_session_transcript(user["id"], interview_id,
+                                        position=ctx.job.position, company=ctx.job.company,
+                                        transcript=transcript)
+    return {"ok": True}
+
+
+@app.post("/api/interviews/{interview_id}/recording")
+def upload_interview_recording(interview_id: str, req: dict, user: dict = Depends(_auth_user)):
+    """Save a browser-recorded audio/video blob (base64) to the data disk and record
+    its path, so the user's voice/camera/screen are preserved as data."""
+    _check_owner(interview_id, user)
+    import base64 as _b64
+
+    data = str(req.get("data", ""))
+    mime = str(req.get("mime", "video/webm"))
+    if not data:
+        raise HTTPException(400, "no recording data")
+    try:
+        raw = _b64.b64decode(data, validate=True)
+    except Exception:  # noqa: BLE001
+        raise HTTPException(400, "invalid base64")
+    if len(raw) > 200 * 1024 * 1024:  # 200 MB cap
+        raise HTTPException(413, "recording too large (max 200 MB)")
+    RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+    safe = "".join(c for c in interview_id if c.isalnum() or c in "-_") or "interview"
+    ext = ".webm" if "webm" in mime else ".webm"
+    fname = f"{safe}-{datetime.utcnow().strftime('%Y%m%dT%H%M%S')}{ext}"
+    path = RECORDINGS_DIR / fname
+    path.write_bytes(raw)
+    url = f"/recordings/{fname}"
+    get_store().set_session_recording(user["id"], interview_id, url)
+    return {"ok": True, "url": url, "bytes": len(raw)}
+
+
 # ---------------------------------------------------------------------------
 # Voice (PTT) endpoints — Volcengine STT + MiniMax TTS
 # ---------------------------------------------------------------------------

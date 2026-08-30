@@ -162,6 +162,7 @@ class LiveFlow:
         self._qseq = 0
         self._opened = False  # the opening self-intro has been spoken once
         self._asked_in_state: str = "intro"  # state in which the LAST question was asked
+        self.screen_note: str = ""  # 实时"看屏幕"旁注（摄像头/共享开启时由前端喂养给 agent）
 
         self.ctx.status = "live"
         self.ctx.cursor = 0
@@ -320,7 +321,8 @@ class LiveFlow:
             f"【候选人简历】\n{_candidate_brief(self.ctx)}\n"
             f"【本场特点】\n{_requirements_brief(self.ctx, self.notes, self.scenario)}\n"
             f"{('【跨场记忆】' + memory) if memory else ''}\n"
-            "【最重要的面试要求 —— 像真人一样对话】\n"
+            + (f"【候选人当前屏幕/摄像头看到的内容（旁注）】\n{self.screen_note}\n" if self.screen_note else "")
+            + "【最重要的面试要求 —— 像真人一样对话】\n"
             "- 你是在跟候选人**对话**，不是在念稿。**你的下一句必须直接回应候选人刚说的那句话**：\n"
             "   · 候选人说了具体内容 → 针对它真诚地追问（如\"你提到用Seata，能具体说说它的全局锁怎么处理吗？\"）。\n"
             "   · 候选人答得简短/跑题 → 先自然接住他说的话（可简短回应），再温和地把他拉回正题，而不是机械地重复\"请介绍项目\"。\n"

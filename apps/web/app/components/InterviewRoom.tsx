@@ -12,6 +12,7 @@ import {
   VideoPresets,
 } from "livekit-client";
 import "@livekit/components-styles";
+import { setLiveKitRoom, getLiveKitRoom, toggleCamera, toggleMicrophone, toggleScreenShare } from "@/lib/livekit-room";
 
 /**
  * 视频房间：以 livekit-meet 同款组件 (@livekit/components-react) 为基础。
@@ -125,6 +126,9 @@ function LiveRoom({
   useEffect(() => {
     let alive = true;
     const connectOptions: RoomConnectOptions = { autoSubscribe: true };
+    // Register the candidate Room in the shared store so ControlDock can drive the
+    // SAME localParticipant's camera/mic/screen-share (true unification).
+    setLiveKitRoom(room);
     room
       .connect(url, token, connectOptions)
       .then(() => {
@@ -136,6 +140,7 @@ function LiveRoom({
       .catch((e) => console.error("room connect failed:", e));
     return () => {
       alive = false;
+      setLiveKitRoom(null);
       room.disconnect().catch(() => {});
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -204,10 +209,17 @@ function TaskPanel() {
 }
 
 /**
- * ControlDock — 右侧竖列：小摄像头缩略图 + 麦克风/摄像头/共享屏 基础控制 + 聊天开关。
- * 与 LiveKit 房间解耦（直接操作浏览器媒体设备），让"左屏对话、右侧设备控制"布局成立。
+ * ControlDock — 右侧竖列：小缩略图 + 麦克风/摄像头/共享屏/聊天 控制。
+ * 直接控制 LiveKit 房间 (localParticipant)——与视频网格共用同一个 Room，真正统一。
+ * 摄像头或共享开启时，会由 DockedScreenFeed 采样画面喂给 Gemini 看屏（旁注给 agent）。
  */
-export function ControlDock({ onChatOpen }: { onChatOpen?: (open: boolean) => void }) {
+export function ControlDock({
+  onChatOpen,
+  onScreenChange,
+}: {
+  onChatOpen?: (open: boolean) => void;
+  onScreenChange?: (screenOn: boolean) => void;
+}) {
   const camRef = useRef<HTMLVideoElement | null>(null);
   const [camOn, setCamOn] = useState(false);
   const [micOn, setMicOn] = useState(true);
@@ -215,52 +227,68 @@ export function ControlDock({ onChatOpen }: { onChatOpen?: (open: boolean) => vo
   const [chatOpen, setChatOpen] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // Reflect a camera stream into the small thumbnail.
+  // Drive the preview thumbnail from the room's actual published tracks.
+  useEffect(() => {
+    const room = getLiveKitRoom();
+    if (!room) return;
+    const seen = () => {
+      const pubs = room.localParticipant.getTrackPublications();
+      const camPub = pubs.find((p) => p.track?.kind === "video" && (p.source as string) === "camera");
+      const scrPub = pubs.find((p) => p.track?.kind === "video" && (p.source as string) === "screen_share");
+      const v = camRef.current;
+      if (!v) return;
+      const active = scrPub || camPub;
+      if (active?.track?.mediaStreamTrack) {
+        v.srcObject = new MediaStream([active.track.mediaStreamTrack]);
+        v.play().catch(() => {});
+      } else {
+        v.srcObject = null;
+      }
+      const nowCam = !!camPub?.track?.mediaStreamTrack && !scrPub;
+      setCamOn(nowCam);
+      setScreenOn(!!scrPub?.track?.mediaStreamTrack);
+      onScreenChange?.(!!scrPub?.track?.mediaStreamTrack);
+    };
+    seen();
+    const iv = window.setInterval(seen, 1200);
+    return () => {
+      window.clearInterval(iv);
+      if (camRef.current) camRef.current.srcObject = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   async function toggleCam() {
-    if (camOn) {
-      camRef.current?.srcObject && (camRef.current.srcObject = null);
-      setCamOn(false);
-      return;
-    }
+    const target = !camOn;
     try {
-      const s = await navigator.mediaDevices.getUserMedia({ video: true });
-      if (camRef.current) { camRef.current.srcObject = s; await camRef.current.play().catch(() => {}); }
-      setCamOn(true);
+      await toggleCamera(target);
+      setCamOn(target);
       setErr(null);
     } catch (e: any) {
       setErr("摄像头不可用：" + (e?.message || String(e)));
     }
   }
-
   async function toggleMic() {
-    if (micOn) { setMicOn(false); return; }
+    const target = !micOn;
     try {
-      await navigator.mediaDevices.getUserMedia({ audio: true });
-      setMicOn(true);
+      await toggleMicrophone(target);
+      setMicOn(target);
       setErr(null);
     } catch (e: any) {
       setErr("麦克风不可用：" + (e?.message || String(e)));
     }
   }
-
-  async function toggleScreen() {
-    if (screenOn) {
-      camRef.current?.srcObject && (camRef.current.srcObject = null);
-      setScreenOn(false);
-      return;
-    }
+  async function toggleShot() {
+    const target = !screenOn;
     try {
-      const s = await (navigator.mediaDevices as any).getDisplayMedia({ video: true, audio: false });
-      const track = s.getVideoTracks()[0];
-      if (track) track.onended = () => setScreenOn(false);
-      if (camRef.current) { camRef.current.srcObject = s; await camRef.current.play().catch(() => {}); }
-      setScreenOn(true);
+      await toggleScreenShare(target);
+      setScreenOn(target);
+      onScreenChange?.(target);
       setErr(null);
     } catch (e: any) {
       setErr("共享屏失败：" + (e?.message || String(e)));
     }
   }
-
   function toggleChat() {
     const next = !chatOpen;
     setChatOpen(next);
@@ -286,7 +314,7 @@ export function ControlDock({ onChatOpen }: { onChatOpen?: (open: boolean) => vo
       {/* 竖列基础控制：视频/共享/麦克风/聊天 */}
       <div className="flex flex-col gap-1.5 items-center pt-1">
         <Btn on={camOn} onClick={toggleCam} icon="📷" label="摄像头" />
-        <Btn on={screenOn} onClick={toggleScreen} icon="🖥️" label="共享屏幕" />
+        <Btn on={screenOn} onClick={toggleShot} icon="🖥️" label="共享屏幕" />
         <Btn on={micOn} onClick={toggleMic} icon={micOn ? "🎙️" : "🔇"} label="麦克风" />
         <Btn on={chatOpen} onClick={toggleChat} icon="💬" label="聊天" />
       </div>

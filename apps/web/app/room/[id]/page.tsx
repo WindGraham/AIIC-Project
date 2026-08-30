@@ -9,6 +9,8 @@ import { base64ToBlob } from "@/lib/voice";
 import CodingPanel from "@/app/components/CodingPanel";
 import InterviewRoom, { ControlDock } from "@/app/components/InterviewRoom";
 import AgentPresence from "@/app/components/AgentPresence";
+import { startScreenFeed, stopScreenFeed } from "@/lib/screenFeed";
+import { createSessionRecorder } from "@/lib/sessionRecorder";
 
 type Mode = "text" | "ptt" | "duplex";
 type Turn = { role: "ai" | "cand"; text: string; audio?: string };
@@ -115,10 +117,13 @@ export default function Room() {
   const lastAiRef = useRef<string>("");
   const [pttTouch, setPttTouch] = useState(false);
   const [pttProcessing, setPttProcessing] = useState(false); // converting speech -> text
+  const recorderRef = useRef<ReturnType<typeof createSessionRecorder> | null>(null);
 
   const addTurn = (role: "ai" | "cand", text: string, audio?: string) => {
     if (role === "ai") lastAiRef.current = text;
     setConvo((c) => [...c, { role, text, audio }]);
+    // 持久化：把每一轮对话实时上报给 agent 落库。
+    recorderRef.current?.pushTurn(role, text);
   };
 
   const playAudio = (b64: string) => {
@@ -200,6 +205,27 @@ export default function Room() {
     if (done) { try { voice.engine?.stop?.(); } catch {} setPartial(""); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [done]);
+
+  // screen-feed: 开摄像头/共享时把画面文本喂给 agent 作"看屏幕"旁注
+  useEffect(() => {
+    if (!live || done) return;
+    startScreenFeed(id);
+    return () => stopScreenFeed();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [live, done, id]);
+
+  // session recording: 记录麦克风/共享屏音视频 + 每一轮对话转写（全部存成数据）
+  useEffect(() => {
+    if (!live || done) return;
+    const rec = createSessionRecorder(id);
+    recorderRef.current = rec;
+    rec.start(); // best-effort; transcript-only if mic/screen denied
+    return () => {
+      rec.stop();
+      recorderRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [live, done, id]);
 
   // ---------- text send ----------
   async function send() {

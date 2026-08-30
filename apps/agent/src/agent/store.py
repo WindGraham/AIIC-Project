@@ -87,6 +87,17 @@ CREATE INDEX IF NOT EXISTS idx_resumes_user ON resumes(user_id);
 CREATE INDEX IF NOT EXISTS idx_bookings_user ON bookings(user_id);
 CREATE INDEX IF NOT EXISTS idx_reports_user ON reports(user_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_interview ON reports(interview_id);
+CREATE TABLE IF NOT EXISTS interview_sessions (
+    id            TEXT PRIMARY KEY,           -- interview_id
+    user_id       TEXT NOT NULL,
+    position      TEXT NOT NULL DEFAULT '',
+    company       TEXT NOT NULL DEFAULT '',
+    transcript_json TEXT NOT NULL DEFAULT '[]', -- [{role,text,ts}]
+    recording_url TEXT NOT NULL DEFAULT '',     -- 本地录音/录像文件路径
+    started_at    TEXT NOT NULL,
+    completed_at  TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_isessions_user ON interview_sessions(user_id);
 """
 
 PERSONA_LEVELS = ("peer", "high-peer", "manager")
@@ -374,6 +385,41 @@ class Store:
                 "created_at": r["created_at"],
             })
         return out
+
+    # -- interview sessions (full transcript + recording, "全部存成数据") --------
+    def save_session_transcript(self, user_id: str, interview_id: str, *, position: str,
+                                company: str, transcript: list[dict]) -> None:
+        """Persist the full conversation transcript for an interview (upsert by id)."""
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO interview_sessions(id, user_id, position, company, transcript_json, started_at) "
+                "VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET transcript_json=excluded.transcript_json, "
+                "user_id=excluded.user_id, position=excluded.position, company=excluded.company",
+                (interview_id, user_id, position or "", company or "",
+                 json.dumps(transcript, ensure_ascii=False), self._now().isoformat()),
+            )
+
+    def set_session_recording(self, user_id: str, interview_id: str, recording_url: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE interview_sessions SET recording_url=? WHERE id=? AND user_id=?",
+                (recording_url, interview_id, user_id),
+            )
+
+    def get_session(self, user_id: str, interview_id: str) -> Optional[dict[str, Any]]:
+        with self._conn() as conn:
+            r = conn.execute(
+                "SELECT * FROM interview_sessions WHERE id=? AND user_id=?", (interview_id, user_id)
+            ).fetchone()
+        if r is None:
+            return None
+        try:
+            transcript = json.loads(r["transcript_json"])
+        except Exception:
+            transcript = []
+        return {"id": r["id"], "position": r["position"], "company": r["company"],
+                "transcript": transcript, "recording_url": r["recording_url"],
+                "started_at": r["started_at"]}
 
 
 # --- module-level singleton (settings-driven) --------------------------------
