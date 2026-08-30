@@ -1,0 +1,15 @@
+[Unit]
+Description=ProbeDesk agent API (FastAPI + brain + voice + search + coding)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/AIIC-Project/apps/agent
+EnvironmentFile=/root/AIIC-Project/apps/agent/.env
+Environment=PYTHONPATH=/root/AIIC-Project/apps/agent/src
+ExecStart=/root/AIIC-Project/apps/agent/.venv/bin/python -m uvicorn agent.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

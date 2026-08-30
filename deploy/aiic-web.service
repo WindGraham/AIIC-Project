@@ -1,0 +1,15 @@
+[Unit]
+Description=ProbeDesk web (Next.js 16)
+After=network.target aiic-agent.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/AIIC-Project/apps/web
+Environment=AGENT_API_URL=http://127.0.0.1:8000
+Environment=LIVEKIT_URL=ws://127.0.0.1:7880
+ExecStart=/root/AIIC-Project/apps/web/node_modules/.bin/next start -p 3101
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

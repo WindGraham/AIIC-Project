@@ -47,3 +47,6 @@ apps/agent/harness/run_out/
 
 # researcher runtime cache (live API search results; not source)
 apps/agent/src/agent/researcher/researcher_cache.json
+
+# deployment private key (never commit; only the .pub is committed)
+deploy/*_ed25519
