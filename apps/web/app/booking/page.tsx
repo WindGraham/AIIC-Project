@@ -32,6 +32,7 @@ export default function Booking() {
     scenario: "algorithm",
     persona: "high-peer",
     mode: "duplex",
+    asap: false,
   });
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -57,11 +58,17 @@ export default function Booking() {
     e.preventDefault();
     setErr(null);
     if (!f.resume_text.trim()) { setErr("请选择或粘贴一份简历"); return; }
+    // 预约制：时间需至少在当前后 30 分钟；尽快开始则不受限。
+    if (!f.asap) {
+      if (!f.scheduled_at) { setErr("请选择预约时间，或勾选「尽快开始」"); return; }
+      const d = new Date(f.scheduled_at);
+      if (d.getTime() && d.getTime() < Date.now() - 60000) { setErr("预约时间不能早于当前时间"); return; }
+    }
     setBusy(true);
     try {
       const payload = {
         ...f,
-        scheduled_at: f.scheduled_at ? new Date(f.scheduled_at).toISOString() : undefined,
+        scheduled_at: f.asap ? new Date().toISOString() : (f.scheduled_at ? new Date(f.scheduled_at).toISOString() : undefined),
         company: f.company || "目标公司",
         position: f.position || "后端开发工程师",
       };
@@ -127,8 +134,16 @@ export default function Booking() {
 
         <label className="flex flex-col gap-1 text-sm">
           预约时间
-          <input type="datetime-local" className="rounded-lg border border-white/10 bg-white/5 p-2"
-            value={f.scheduled_at} onChange={set("scheduled_at")} />
+          <input type="datetime-local" className="rounded-lg border border-white/10 bg-white/5 p-2 disabled:opacity-40"
+            value={f.scheduled_at} onChange={set("scheduled_at")} disabled={f.asap} />
+          <span className="text-xs text-white/40">
+            {f.asap ? "已选「尽快开始」，后台准备完毕即可答题。" : "预约制：最早为当前时间之后 30 分钟；时间未到 agent 不会回复。"}
+          </span>
+        </label>
+
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={f.asap} onChange={(e) => setF((s) => ({ ...s, asap: e.target.checked }))} />
+          ⚡ 尽快开始（后台准备完毕即可进入答题，不受预约时间限制）
         </label>
 
         <div className="grid grid-cols-2 gap-4">

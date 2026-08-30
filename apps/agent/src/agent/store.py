@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS bookings (
     scenario    TEXT NOT NULL DEFAULT 'algorithm',
     persona     TEXT NOT NULL DEFAULT 'high-peer',
     mode        TEXT NOT NULL DEFAULT 'duplex',
+    asap        INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS reports (
@@ -119,6 +120,8 @@ class Store:
             cols = {r["name"] for r in conn.execute("PRAGMA table_info(bookings)").fetchall()}
             if "mode" not in cols:
                 conn.execute("ALTER TABLE bookings ADD COLUMN mode TEXT NOT NULL DEFAULT 'duplex'")
+            if "asap" not in cols:
+                conn.execute("ALTER TABLE bookings ADD COLUMN asap INTEGER NOT NULL DEFAULT 0")
         except sqlite3.Error:
             pass  # column exists / table missing — nothing to do
 
@@ -295,14 +298,14 @@ class Store:
         with self._conn() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO bookings(id, user_id, name, resume_id, resume_text, company, position, "
-                "jd_text, scheduled_at, notes, has_coding, scenario, persona, mode, created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "jd_text, scheduled_at, notes, has_coding, scenario, persona, mode, asap, created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (bid, user_id, booking.get("name", "模拟面试"), booking.get("resume_id", ""),
                  booking.get("resume_text", ""), booking.get("company", ""), booking.get("position", ""),
                  booking.get("jd_text", ""), str(booking.get("scheduled_at", self._now().isoformat())),
                  booking.get("notes", ""), 1 if booking.get("has_coding", True) else 0,
                  booking.get("scenario", "algorithm"), booking.get("persona", "high-peer"),
-                 booking.get("mode", "duplex"),
+                 booking.get("mode", "duplex"), 1 if booking.get("asap", False) else 0,
                  booking.get("created_at", self._now().isoformat())),
             )
         return self._booking_row(conn.execute("SELECT * FROM bookings WHERE id=? AND user_id=?", (bid, user_id)).fetchone())
@@ -324,6 +327,7 @@ class Store:
             "scenario": b["scenario"],
             "persona": b["persona"],
             "mode": b["mode"] if "mode" in b.keys() else "duplex",
+            "asap": bool(b["asap"]) if "asap" in b.keys() else False,
             "created_at": b["created_at"],
         }
 

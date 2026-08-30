@@ -29,7 +29,7 @@
 
 **方向选择**：聚焦**计算机行业技术岗实习面试**，保留**保研复试兼容入口**但不作为主要处理。
 
-原因：
+**原因：**
 ① 保研复试的同学普遍相对有把握；
 ② 虽题面说"学弟学妹找不到合适的学长学姐对练"，但调研显示**请教自己的学长学姐才是最有效**的方案；
 ③ 当前搜索能力不足以对细小的专业方向建立"委员会式群面 agent 集群"；
@@ -41,17 +41,22 @@
 - **获取经验 → 让模拟面试"真实"**：结合自己多次实习面试经历，做了**预约面试 → 自测设备 → 按时进入**的完整流程来缓解紧张；面试间提供**三种模式**（文字 / 按住说话 / **全双工 tts-llm-stt 实时对话**，后者受限开发时间目前不太稳定）+ **LiveKit 视频房间**（麦克风/摄像头/屏幕共享）；coding 环节**按岗自动配题** + AI 实时读码判分给提示阶梯；**AI 看屏幕**（Gemini 视觉）。
 - **改进简历 → 不同面试官风格 + 会议总结**：提供多种**面试官人格**（同级/资深同级/主管，允许选严格的），面试后根据过程生成**面试会议总结 + 反馈**（`interviewer_os`：missing_slots → what_i_want_to_hear → 一句话建议，只在报告呈现）。
 
-**三个"比 ChatGPT 更好"的差异化**：**人格分层**；**跨场记忆/学习曲线**（每场结果落库，下一场注入你上次的薄弱项，报告页有多场趋势+薄弱项+重练入口）；**按岗自动配题**（岗位技术栈→算法 tag→题库选题）。加上**信息充分**（真实检索岗位画像）与**可执行反馈**（interviewer_os）。
-
-**刻意不做 & 为什么**：不做保研复试深度化、不做多面试官委员会式群面 agent 集群（能力不足 + 保研复试较有把握，只留兼容入口）；不追求功能数量——**先把"技术岗实习面试"这一个核心闭环做扎实**。
-
 ## ③ 版本迭代记录
 
-- **Phase 0/1**：先做**大脑纯文本闭环 + 双 agent 互聊测试 + 离线题库**（零第三方 key 验证差异化）。
-- **Phase 3**：真实语音（STT→大脑→TTS）；**Phase 4**：手撕代码判分 + AI 看屏幕；**Phase 5**：转写 / 分享 / 录制。
-- **平台化（Phase 6）**：账号 + SQLite 独立数据盘 + 预约/面试列表/报告 + systemd 常驻 + 公网部署。
-- **近期演进**：视频房间从"iframe 嵌入 livekit-meet"改为"以 `@livekit/components-react` 在 ProbeDesk 内重排成面试态房间"；语音从"按住说话 PTT"升级为**全双工流式（可打断）**；面试主持从"死板游标"升级为**每轮重建的 time-aware agent（liveflow）**；提供 **3 种面试模式**；按**对抗式审查**修复 C1/C2/C3/H4/H5/M10 等关键 bug。
-- **过程原则**：每阶段**真实 API 测试 + 对抗性审查 + 独立提交**（共 40 个 commit，commit 粒度清晰、便于回滚）。
+> 按提交顺序标注每个阶段的 **commit 区间**（commit 从 1 起，最旧→最新）。
+
+- **Phase 0（commit 1）**：monorepo 脚手架 + shared 类型契约 + agent/web 骨架 + 开发文档。
+- **Phase 1（commit 2–5）**：面试大脑 **prep→live→post**（真实 DeepSeek 验证）；离线 150 题手撕题库；按岗把题目挂到 coding 环节。
+- **Phase 2（commit 6–7）**：glue —— agent API 通过 HTTP 驱动整场面试。
+- **Phase 3（commit 8–9）**：真实语音 pipeline（Volcengine STT + MiniMax TTS）+ 房间内按住说话。
+- **Phase 4（commit 10–12）**：判码（agent 读码给提示阶梯）+ web 手撕环节 + AI 看屏幕（Gemini 视觉）。
+- **Phase 5（commit 13）**：转写 / 分享链接 / 语音回顾。
+- **Phase 6（commit 14, 16–17）**：README + 部署/演示指南；Product Memo + 一键部署；上线 **https://mock.windgraham.art**。
+- **健壮性（commit 15）**：离线 API 健壮性（未知 id → 404，绝不出 500）。
+- **平台化（commit 18–25）**：预约调度(A1) + 账号/SQLite 独立盘/预约人格(A0) + 认证加固 + 真实浏览器搜索(小红书/知乎) + 人格分层/跨场记忆/按岗配题(C1/C2/C3) + systemd(D1) + 对抗式审查修复 + 文档。
+- **媒体增强 B（commit 26–32）**：实时转写(B3) + LiveKit 视频房间/录制/分享(B1+B4) + 改为基于 `@livekit/components-react`（livekit-meet 组件）+ 移除旧 iframe 路由。
+- **近期演进（commit 33–44）**：LiveKit agent 调度 + **真正全双工语音（可打断）** + **liveflow 每轮重建的 time-aware agent** + **3 种面试模式**（文字/PTT/全双工）+ 真实视频房间/自测房间 + 对抗式审查修复 C1/C2/C3/H4/H5/M10 + 语音开场修复 + 简历上传解析/显式状态机。
+- **过程原则**：每阶段**真实 API 测试 + 对抗性审查 + 独立提交**（共 **44 个 commit**，commit 粒度清晰、便于回滚）。
 
 ## ④ 下一步设计
 
@@ -68,3 +73,5 @@
 - **开发/测试**：AI 编码 Agent + **并行 subagent 集群做对抗式审查**（前端/后端/端到端/测试），全程真实 API 联调、mock-first 降级。
 
 **技术栈**：Next.js 16（App Router）+ FastAPI/Pydantic；LiveKit（视频，自托管 `wss://voice.windgraham.art`）；SQLite（独立数据盘 `/data/probedesk`）；题库=离线 LeetCode-CN 150 题；systemd 常驻（agent:8000 / web:3101）。
+
+> **参考**：主要参考了 **DeepInterview** 的架构理念（**prep→live→post**）。

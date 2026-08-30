@@ -45,8 +45,10 @@ export default function Interviews() {
   const enriched = items.map((b) => {
     const t = b.scheduled_at ? new Date(b.scheduled_at).getTime() : 0;
     const secs = t ? Math.floor((t - now) / 1000) : 0;
-    const status = secs <= 0 ? "available" : "scheduled";
-    return { ...b, seconds_until_start: Math.max(0, secs), status };
+    // 尽快开始：随时可进入；预约制：到点才可进入并答题。
+    const gate = !!b.asap || secs <= 0;
+    const status = gate ? (secs <= 0 || b.asap ? "available" : "scheduled") : "scheduled";
+    return { ...b, seconds_until_start: Math.max(0, secs), status, gate };
   });
 
   async function enter(b: Booking) {
@@ -55,13 +57,13 @@ export default function Interviews() {
     const r = await fetch(`/api/interviews/${b.id}/start`, { method: "POST" });
     const d = await r.json();
     if (!r.ok) { alert(d.error || "进入失败"); return; }
-    router.push(`/room/${d.interview_id}?mode=${encodeURIComponent(b.mode || "duplex")}`);
+    router.push(`/room/${d.interview_id}?mode=${encodeURIComponent(b.mode || "duplex")}&asap=${b.asap ? "1" : "0"}`);
   }
 
   return (
     <main className="max-w-4xl mx-auto p-6">
       <h1 className="text-2xl font-bold mb-1">面试列表</h1>
-      <p className="text-white/50 text-sm mb-6">随时可提前进入房间，AI 面试官到点才加入。</p>
+      <p className="text-white/50 text-sm mb-6">预约制到点才可答题；「尽快开始」后台准备完毕即可答题。</p>
 
       {err && <div className="text-red-400 text-sm mb-4">{err}</div>}
       {enriched.length === 0 && <div className="text-white/40 text-sm">还没有预约，去「预约面试」创建一场。</div>}
@@ -69,6 +71,7 @@ export default function Interviews() {
       <div className="flex flex-col gap-3">
         {enriched.map((b) => {
           const st = STATUS[String(b.status)] || STATUS.scheduled;
+          const gate = !!b.gate;
           return (
             <div key={b.id} className="rounded-xl border border-white/10 p-4 flex items-center justify-between gap-4">
               <div className="min-w-0">
@@ -77,13 +80,16 @@ export default function Interviews() {
                   {b.company} · {b.position} · {b.scenario === "retest" ? "保研复试" : "算法/研发"} · 人格：{
                     { peer: "同级", "high-peer": "资深同级", manager: "主管" }[b.persona] || b.persona}
                   {" · "}{{ text: "文字对话", ptt: "按住说话", duplex: "真实对话" }[b.mode] || b.mode}
+                  {b.asap && <span className="text-amber-300"> · ⚡尽快开始</span>}
                 </div>
-                <div className={`text-sm mt-1 ${st.cls}`}>{st.label} · 距开始 {fmt(b.seconds_until_start || 0)}</div>
+                <div className={`text-sm mt-1 ${gate ? "text-green-400" : "text-yellow-400"}`}>
+                  {b.asap ? "后台准备完毕即可答题" : gate ? "可进入 · agent 会回复" : `待开始 · 距开始 ${fmt(b.seconds_until_start || 0)}`}
+                </div>
                 {b.has_coding && <div className="text-xs text-white/40 mt-1">含手撕代码</div>}
               </div>
-              <button onClick={() => enter(b)}
-                className={`shrink-0 rounded-lg p-2.5 font-semibold ${b.status === "available" ? "bg-indigo-500 hover:bg-indigo-400" : "border border-white/10 hover:border-white/30"}`}>
-                {b.status === "available" ? "进入面试" : "提前进入"}
+              <button onClick={() => enter(b)} disabled={!gate}
+                className={`shrink-0 rounded-lg p-2.5 font-semibold ${gate ? "bg-indigo-500 hover:bg-indigo-400" : "border border-white/10 text-white/30 cursor-not-allowed"}`}>
+                {gate ? "进入面试" : "未到时间"}
               </button>
             </div>
           );

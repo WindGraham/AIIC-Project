@@ -18,6 +18,8 @@ from .store import PERSONA_LEVELS, get_store
 
 # Interview modes selectable at booking: text chat / push-to-talk / full-duplex.
 MODES = ("text", "ptt", "duplex")
+# 预约制上架下限：预约时间必须至少在当前时间之后这么多分钟（业务规则）。
+MIN_BOOKING_AHEAD_MIN = 30
 from .contracts import InterviewContext
 from .coding import judge_code, load_problem
 from .llm import LLM
@@ -49,6 +51,8 @@ from concurrent.futures import ThreadPoolExecutor  # noqa: E402
 
 _PREP_EXECUTOR = ThreadPoolExecutor(max_workers=2)
 _PENDING: set[str] = set()
+# interview_id -> set when build_plan failed. Drives the "red light" (cannot start).
+_FAILED: set[str] = set()
 # interview_id -> owner user_id, set at /start. Used to gate the live interview
 # endpoints & /report persistence to the interviewer's owner (cross-user safety).
 _OWNER: dict[str, str] = {}
@@ -75,6 +79,7 @@ class Booking(BaseModel):
     scenario: str = "algorithm"  # algorithm | retest(保研复试占位)
     persona: str = "high-peer"   # peer | high-peer | manager
     mode: str = "duplex"         # text | ptt | duplex (面试方案)
+    asap: bool = False           # 尽快开始：后台准备完毕即可答题，不受预约时间限制
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -192,6 +197,15 @@ def book_interview(payload: Booking, user: dict = Depends(_auth_user)):
         payload.mode = "duplex"
     if not payload.name:
         payload.name = f"{payload.position or '模拟'}面试"
+    # 尽快开始 (asap): allowed at any time; the agent answers as soon as prep done.
+    # 预约制: scheduled_at must be >= now + MIN_BOOKING_AHEAD_MIN (business rule).
+    if not payload.asap:
+        dt = payload.scheduled_at
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        now = datetime.utcnow()
+        if (dt - now).total_seconds() < MIN_BOOKING_AHEAD_MIN * 60:
+            raise HTTPException(400, f"预约时间需至少在当前时间之后 {MIN_BOOKING_AHEAD_MIN} 分钟")
     get_store().save_booking(user["id"], payload.model_dump())
     return payload
 
@@ -214,6 +228,8 @@ def list_interviews(user: dict = Depends(_auth_user)):
             **b,
             "seconds_until_start": int(max(0, delta)),
             "status": "available" if delta <= 0 else "scheduled",
+            "asap": bool(b.get("asap", False)),
+            "gate": bool(b.get("asap", False)) or delta <= 0,
         })
     out.sort(key=lambda x: x.get("scheduled_at", ""))
     return out
@@ -228,23 +244,36 @@ def start_interview(booking_id: str, user: dict = Depends(_auth_user)):
     persona = b.get("persona", "high-peer") if b.get("persona") in PERSONA_LEVELS else "high-peer"
     _PENDING.add(iid)
     _OWNER[iid] = user["id"]
+    sched = b.get("scheduled_at", "")
+    try:
+        sdt = datetime.fromisoformat(str(sched))
+        if sdt.tzinfo is not None:
+            sdt = sdt.astimezone(timezone.utc).replace(tzinfo=None)
+    except Exception:
+        sdt = datetime.utcnow()
     _BOOKING_CFG[iid] = {
         "has_coding": bool(b.get("has_coding", True)),
         "notes": b.get("notes", ""),
         "scenario": b.get("scenario", "algorithm"),
         "persona": persona,
+        "scheduled_at": sdt,
+        "asap": bool(b.get("asap", False)),
     }
 
     def _do_start():
-        """Run build_plan (search + LLM) in a worker; store the context when done."""
+        """Run build_plan (search + LLM) in a worker; store the context when done.
+        On failure, mark the interview as failed (red light) so the UI can surface
+        a 'cannot start' state instead of a silent 404."""
         try:
             persona_inner = b.get("persona", "high-peer") if b.get("persona") in PERSONA_LEVELS else "high-peer"
             ctx = build_plan(b.get("resume_text", ""), b.get("jd_text", ""), b.get("company", ""),
                              b.get("position", ""), "mid", "zh", persona=persona_inner,
                              memory_brief=_history_brief(user["id"], b.get("position", "")))
             _put_context(iid, ctx)
+            _FAILED.discard(iid)
         except Exception as exc:  # noqa: BLE001
             logger.exception("prep failed for %s: %s", booking_id, exc)
+            _FAILED.add(iid)
         finally:
             _PENDING.discard(iid)
 
@@ -257,6 +286,8 @@ def start_interview(booking_id: str, user: dict = Depends(_auth_user)):
         "status": "preparing" if ctx is None else "ready",
         "question": ask_current(ctx) if ctx else None,
         "persona": persona,
+        "asap": b.get("asap", False),
+        "gate": _can_start_now(iid),
         "plan": None if ctx is None else {
             "sections_order": ctx.plan.sections_order,
             "questions": [{"id": q.id, "section": q.section, "text": q.text,
@@ -404,12 +435,44 @@ def prepare(req: PrepareRequest):
     }
 
 
+def _can_start_now(interview_id: str) -> bool:
+    """Whether the agent is ALLOWED to answer now.
+
+    - 尽快开始 (asap): True once prep is done (scheduled time ignored).
+    - 预约制: True only when now >= scheduled_at.
+    """
+    cfg = _BOOKING_CFG.get(interview_id, {})
+    if cfg.get("asap"):
+        return True
+    sched = cfg.get("scheduled_at")
+    if sched is None:
+        return True
+    try:
+        dt = sched if sched.tzinfo is None else sched.astimezone(timezone.utc).replace(tzinfo=None)
+        return datetime.utcnow() >= dt
+    except Exception:
+        return True
+
+
+def _prep_status(interview_id: str) -> str:
+    """Prep light: 'preparing' (yellow) | 'ready' (green) | 'failed' (red)."""
+    if interview_id in _FAILED:
+        return "failed"
+    if interview_id in _PENDING:
+        return "preparing"
+    if interview_id in _CONTEXTS:
+        return "ready"
+    # Unknown interview id: treat as not found.
+    return "preparing"
+
+
 def _ctx(interview_id: str) -> tuple[Optional[InterviewContext], bool]:
     """(context, is_preparing). We treat iid missing from _PENDING as a hard 404."""
     ctx = _CONTEXTS.get(interview_id)
     if ctx is not None:
         return ctx, False
-    # not built yet: if it's a known pending prep, report preparing (not 404)
+    if interview_id in _FAILED:
+        raise HTTPException(409, "interview preparation failed")
     if interview_id in _PENDING:
         return None, True
     raise HTTPException(404, "interview not prepared")
@@ -465,9 +528,16 @@ def _check_owner(interview_id: str, user: Optional[dict[str, Any]] = None) -> No
 @app.get("/api/interviews/{interview_id}/next")
 def next_question(interview_id: str, user: Optional[dict] = Depends(_optional_user)):
     _check_owner(interview_id, user)
+    status = _prep_status(interview_id)
+    if status == "failed":
+        return {"status": "failed", "question": None, "done": False, "section": None, "gate": False}
     ctx, preparing = _ctx(interview_id)
     if preparing:
-        return {"status": "preparing", "question": None, "done": False, "section": None}
+        return {"status": "preparing", "question": None, "done": False, "section": None, "gate": False}
+    # 预约制：时间未到，agent 暂不回复（门控）。
+    if not _can_start_now(interview_id):
+        return {"status": "ready", "gate": False, "question": None, "done": False,
+                "section": None, "state_label": "未到预约时间，暂不能答题", "state": None}
     # Every live interview is driven by the per-round LiveFlow agent.
     flow = _flow_for(interview_id)
     opening = flow.opening_line()  # idempotent
@@ -478,6 +548,7 @@ def next_question(interview_id: str, user: Optional[dict] = Depends(_optional_us
         "phase": flow.phase,
         "state": flow.state,
         "state_label": flow.state_label(),
+        "gate": True,
         "liveflow": True,
     }
 
@@ -486,6 +557,10 @@ def next_question(interview_id: str, user: Optional[dict] = Depends(_optional_us
 def answer(interview_id: str, req: dict, user: dict = Depends(_auth_user)):
     _check_owner(interview_id, user)
     _require_ctx(interview_id)
+    # 预约制：时间未到，agent 不回复（不推进流程）。
+    if not _can_start_now(interview_id):
+        return {"gated": True, "next_question": None, "done": False, "section": None,
+                "state": None, "state_label": "未到预约时间，暂不能答题"}
     txt = str(req.get("answer", "")).strip()
     flow = _flow_for(interview_id)
     if not txt:
@@ -578,7 +653,14 @@ def voice_stt(req: STTCall):
 @app.post("/api/voice/answer")
 def voice_answer(req: VoiceAnswer, user: dict = Depends(_auth_user)):
     _check_owner(req.interview_id, user)
-    ctx = _require_ctx(req.interview_id)
+    _require_ctx(req.interview_id)
+    # 预约制：时间未到，agent 不回复。
+    if not _can_start_now(req.interview_id):
+        speak = "未到预约时间，暂不能答题。请到预约时间后再开始。"
+        mp3 = synthesize(speak)
+        return {"text": "", "spoken": speak, "next_question": speak, "done": False,
+                "audio_b64": base64.b64encode(mp3).decode(), "section": None, "phase": None,
+                "gated": True}
     flow = _flow_for(req.interview_id)
     # When the AI is speaking (opening or follow-up), a candidate turn may begin
     # with the user pressing PTT. If the flow hasn't opened yet, open first.

@@ -138,20 +138,28 @@ export default function Room() {
   });
 
   // on mount: load the next question (text) — the voice engine announces it for
-  // voice modes; text mode shows it directly.
+  // voice modes; text mode shows it directly. Handles prep-status lights:
+  // preparing(yellow) -> ready(green); failed(red) = cannot start.
   useEffect(() => {
     (async () => {
       setQ("AI 面试官正在准备面试…");
       try {
         let d = null;
-        for (let i = 0; i < 60; i++) {
+        for (let i = 0; i < 120; i++) {
           const r = await fetch(`/api/interviews/${id}/next`);
           if (r.status === 404) { setQ("无法加载面试。"); return; }
           d = await r.json();
-          if (d.status === "preparing") { await new Promise((res) => setTimeout(res, 2000)); continue; }
+          if (d.status === "failed") { setQ("面试准备失败，无法开始。请检查后重试或联系管理员。"); return; }
+          if (d.status === "preparing") { setQ("AI 正在检索岗位信息、准备面试…"); await new Promise((res) => setTimeout(res, 2000)); continue; }
           break;
         }
         if (!d || d.status === "preparing") { setQ("面试准备超时，请稍后重试。"); return; }
+        // 预约制：时间未到，agent 暂不回复。
+        if (d.gate === false) {
+          setQ("未到预约时间，暂不能答题。请到预约时间后刷新。");
+          setStateLabel(d.state_label || null);
+          return;
+        }
         setQ(d.question);
         setSection(d.section);
         setStateLabel(d.state_label || d.phase || null);
@@ -183,6 +191,7 @@ export default function Room() {
       });
       const d = await r.json();
       if (!r.ok) { throw new Error(d.detail || d.error || `请求失败(${r.status})`); }
+      if (d.gated) { setQ(d.state_label || "未到预约时间，暂不能答题。"); return; }
       if (d.done) { setDone(true); }
       else if (d.next_question) { addTurn("ai", d.next_question); setQ(d.next_question); }
       setSection(d.section);

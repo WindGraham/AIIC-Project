@@ -67,6 +67,18 @@ def _flow_for(interview_id: str):
     except Exception:  # noqa: BLE001
         return None
 
+
+def _can_start_now(interview_id: str) -> bool:
+    """Whether the agent is allowed to answer (预约制: not before scheduled_at)."""
+    if not interview_id:
+        return True
+    try:
+        from .main import _can_start_now as _main_can_start  # noqa: PLC0415
+
+        return _main_can_start(interview_id)
+    except Exception:  # noqa: BLE001
+        return True
+
 logger = logging.getLogger("agent.voice_ws")
 
 #: sentinel pushed onto the turn queue to signal "end of this turn's audio"
@@ -299,6 +311,9 @@ class VoiceSession:
         """
         if self._announced:
             return
+        # 预约制：时间未到，不开口、不推进。
+        if not _can_start_now(self.interview_id):
+            return
         try:
             flow = _flow_for(self.interview_id)
         except Exception:  # noqa: BLE001
@@ -472,6 +487,9 @@ class VoiceSession:
         """Per-round interviewer line from the LiveFlow agent: persona + resume +
         this interview's requirements + FULL chat history. Advances the interview
         (self-intro -> project -> probe -> coding -> wrap) with time awareness."""
+        # 预约制：时间未到，agent 不回复。
+        if not _can_start_now(self.interview_id):
+            return "未到预约时间，暂不能答题。请到预约时间后再开始。"
         try:
             flow = _flow_for(self.interview_id)
         except Exception:  # noqa: BLE001

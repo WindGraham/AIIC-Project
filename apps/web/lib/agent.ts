@@ -118,9 +118,11 @@ export type Booking = {
   scenario: string;
   persona: string;
   mode: string;
+  asap: boolean;
   created_at: string;
   seconds_until_start?: number;
   status?: string;
+  gate?: boolean;
 };
 
 export async function listBookings(): Promise<Booking[]> {
