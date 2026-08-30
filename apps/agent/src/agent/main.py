@@ -943,6 +943,26 @@ def search(req: SearchRequest):
     return {"query": query, "sources": [s.model_dump() for s in sources]}
 
 
+class LLMPing(BaseModel):
+    text: str = "你好，请用一句话介绍你自己。"
+    system: str = ""
+
+
+@app.post("/api/llm/ping")
+def llm_ping(req: LLMPing):
+    """LLM 接口连通性测试：发一段文本给 LLM，看是否返回（返回原文 + 模型的回答）。"""
+    s = get_settings()
+    if not s.llm_api_key:
+        raise HTTPException(503, "LLM API key not configured")
+    try:
+        msgs = [{"role": "system", "content": req.system or "你是一个友好的 AI 助手。"},
+                {"role": "user", "content": req.text}]
+        out = LLM().chat(msgs, max_tokens=200, temperature=0.6, timeout=45.0)
+        return {"ok": True, "model": s.llm_model, "prompt": req.text[:200], "reply": out}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+
+
 # ---------------------------------------------------------------------------
 # Transcript + share + audio recap (Phase 5)
 # ---------------------------------------------------------------------------

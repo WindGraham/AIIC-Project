@@ -4,6 +4,8 @@ import { useMemo } from "react";
 import InterviewRoom from "@/app/components/InterviewRoom";
 import VoiceTextTts from "@/app/components/VoiceTextTts";
 import RealtimeScreenList from "@/app/components/RealtimeScreenList";
+import SearchTest from "@/app/components/SearchTest";
+import LlmPing from "@/app/components/LlmPing";
 
 /**
  * 功能测试：与真实面试完全相同的房间（仅无 AI 进入），用于自测。
@@ -35,6 +37,10 @@ export default function SelfTest() {
             <RealtimeScreenList />
           </div>
         </div>
+
+        <SearchTest />
+
+        <LlmPing />
       </div>
 
       <p className="mt-3 text-xs text-white/40">
