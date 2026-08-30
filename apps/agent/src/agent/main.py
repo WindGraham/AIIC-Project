@@ -4,6 +4,7 @@ Live interviewer logic (prep/live/post + voice) is layered on in later phases.""
 
 import base64
 import json
+import logging
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -23,10 +24,17 @@ from .stt import transcribe_flash
 from .tts import synthesize
 
 app = FastAPI(title="aiic-agent", version="0.1.0")
+logger = logging.getLogger("agent.main")
 
 # in-memory contexts keyed by interview id (transient per live run)
 _CONTEXTS: dict[str, InterviewContext] = {}
 _MAX_CONTEXTS = 500  # guard against unbounded memory growth from unauthed prep
+# Background prep executor + pending set: /start returns immediately with a
+# "preparing" state while build_plan (search + LLM) runs in a worker thread.
+from concurrent.futures import ThreadPoolExecutor  # noqa: E402
+
+_PREP_EXECUTOR = ThreadPoolExecutor(max_workers=2)
+_PENDING: set[str] = set()
 
 
 # ---------------------------------------------------------------------------
@@ -145,25 +153,41 @@ def list_interviews(user: dict = Depends(_auth_user)):
     return out
 
 
-@app.post("/api/interviews/{booking_id}/start", status_code=201)
+@app.post("/api/interviews/{booking_id}/start", status_code=202)
 def start_interview(booking_id: str, user: dict = Depends(_auth_user)):
     b = get_store().get_booking(user["id"], booking_id)
     if b is None:
         raise HTTPException(404, "booking not found")
-    # reuse the booking fields to build the interview context (real LLM prep)
-    persona = b.get("persona", "high-peer") if b.get("persona") in PERSONA_LEVELS else "high-peer"
-    ctx = build_plan(b.get("resume_text", ""), b.get("jd_text", ""), b.get("company", ""),
-                     b.get("position", ""), "mid", "zh", persona=persona)
     iid = str(uuid.uuid4())
-    _put_context(iid, ctx)
-    from .pipeline import ask_current as _ask
+    persona = b.get("persona", "high-peer") if b.get("persona") in PERSONA_LEVELS else "high-peer"
+    _PENDING.add(iid)
+
+    def _do_start():
+        """Run build_plan (search + LLM) in a worker; store the context when done."""
+        try:
+            persona_inner = b.get("persona", "high-peer") if b.get("persona") in PERSONA_LEVELS else "high-peer"
+            ctx = build_plan(b.get("resume_text", ""), b.get("jd_text", ""), b.get("company", ""),
+                             b.get("position", ""), "mid", "zh", persona=persona_inner)
+            _put_context(iid, ctx)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("prep failed for %s: %s", booking_id, exc)
+        finally:
+            _PENDING.discard(iid)
+
+    _PREP_EXECUTOR.submit(_do_start)
+    # Answer-ready only when context is built; the room polls /next meanwhile.
+    ctx = _CONTEXTS.get(iid)
     return {
         "interview_id": iid,
         "booking_id": booking_id,
-        "question": _ask(ctx),
-        "plan": {"sections_order": ctx.plan.sections_order,
-                 "questions": [{"id": q.id, "section": q.section, "text": q.text,
-                                "difficulty": q.difficulty, "problem_id": q.problem_id} for q in ctx.plan.questions]},
+        "status": "preparing" if ctx is None else "ready",
+        "question": ask_current(ctx) if ctx else None,
+        "persona": persona,
+        "plan": None if ctx is None else {
+            "sections_order": ctx.plan.sections_order,
+            "questions": [{"id": q.id, "section": q.section, "text": q.text,
+                           "difficulty": q.difficulty, "problem_id": q.problem_id} for q in ctx.plan.questions],
+        },
     }
 
 
@@ -277,11 +301,31 @@ def prepare(req: PrepareRequest):
     }
 
 
+def _ctx(interview_id: str) -> tuple[Optional[InterviewContext], bool]:
+    """(context, is_preparing). We treat iid missing from _PENDING as a hard 404."""
+    ctx = _CONTEXTS.get(interview_id)
+    if ctx is not None:
+        return ctx, False
+    # not built yet: if it's a known pending prep, report preparing (not 404)
+    if interview_id in _PENDING:
+        return None, True
+    raise HTTPException(404, "interview not prepared")
+
+
+def _require_ctx(interview_id: str) -> InterviewContext:
+    """Like _ctx but raises 409 (preparing) instead of returning a 2-tuple."""
+    ctx, preparing = _ctx(interview_id)
+    if preparing:
+        raise HTTPException(409, "interview still preparing — try again shortly")
+    assert ctx is not None
+    return ctx
+
+
 @app.get("/api/interviews/{interview_id}/next")
 def next_question(interview_id: str):
-    ctx = _CONTEXTS.get(interview_id)
-    if ctx is None:
-        raise HTTPException(404, "interview not prepared")
+    ctx, preparing = _ctx(interview_id)
+    if preparing:
+        return {"status": "preparing", "question": None, "done": False, "section": None}
     q = ask_current(ctx)
     cq = current_question(ctx)
     return {"question": q, "done": q is None, "section": cq.section if cq else None}
@@ -289,9 +333,7 @@ def next_question(interview_id: str):
 
 @app.post("/api/interviews/{interview_id}/answer")
 def answer(interview_id: str, req: dict):
-    ctx = _CONTEXTS.get(interview_id)
-    if ctx is None:
-        raise HTTPException(404, "interview not prepared")
+    ctx = _require_ctx(interview_id)
     nxt = record_answer(ctx, str(req.get("answer", "")))
     cq = current_question(ctx)
     return {"next_question": nxt, "done": nxt is None, "section": cq.section if cq else None}
@@ -299,9 +341,7 @@ def answer(interview_id: str, req: dict):
 
 @app.get("/api/interviews/{interview_id}/report")
 def report(interview_id: str):
-    ctx = _CONTEXTS.get(interview_id)
-    if ctx is None:
-        raise HTTPException(404, "interview not prepared")
+    ctx = _require_ctx(interview_id)
     sc = finalize(ctx)
     os_ = sc.interviewer_os
     return {
@@ -353,9 +393,7 @@ def voice_stt(req: STTCall):
 
 @app.post("/api/voice/answer")
 def voice_answer(req: VoiceAnswer):
-    ctx = _CONTEXTS.get(req.interview_id)
-    if ctx is None:
-        raise HTTPException(404, "interview not prepared")
+    ctx = _require_ctx(req.interview_id)
     q = ask_current(ctx)
     if q is None:
         sc = finalize(ctx)
@@ -392,9 +430,7 @@ def _coding_question(ctx: InterviewContext):
 
 @app.get("/api/interviews/{interview_id}/problem")
 def get_coding_problem(interview_id: str):
-    ctx = _CONTEXTS.get(interview_id)
-    if ctx is None:
-        raise HTTPException(404, "interview not prepared")
+    ctx = _require_ctx(interview_id)
     q = _coding_question(ctx)
     if q is None:
         return {"problem": None, "question_text": None}
@@ -404,9 +440,7 @@ def get_coding_problem(interview_id: str):
 
 @app.post("/api/coding/judge")
 def coding_judge(req: CodingJudgeRequest):
-    ctx = _CONTEXTS.get(req.interview_id)
-    if ctx is None:
-        raise HTTPException(404, "interview not prepared")
+    ctx = _require_ctx(req.interview_id)
     q = _coding_question(ctx)
     prob = load_problem(q.problem_id) if q else None
     verdict = judge_code(prob, req.code, req.language)
@@ -431,6 +465,27 @@ def vision_analyze(req: VisionCall):
 
 
 # ---------------------------------------------------------------------------
+# Info search (小红书 / 知乎 / 牛客 / 搜索引擎) — multi-engine, best-effort.
+# ---------------------------------------------------------------------------
+class SearchRequest(BaseModel):
+    query: str
+    limit: int = 10
+
+
+@app.post("/api/search")
+def search(req: SearchRequest):
+    from .researcher.providers import get_providers, run_queries
+
+    query = (req.query or "").strip()
+    if not query:
+        raise HTTPException(400, "query is required")
+    providers = [p for p in get_providers() if p.enabled]
+    sources = run_queries(providers, [query], per_query=min(max(req.limit, 3), 10),
+                          max_total=req.limit, deadline=45.0, workers=6)
+    return {"query": query, "sources": [s.model_dump() for s in sources]}
+
+
+# ---------------------------------------------------------------------------
 # Transcript + share + audio recap (Phase 5)
 # ---------------------------------------------------------------------------
 def _transcript_items(ctx: InterviewContext) -> list[dict]:
@@ -445,9 +500,7 @@ def _transcript_items(ctx: InterviewContext) -> list[dict]:
 
 @app.get("/api/interviews/{interview_id}/transcript")
 def get_transcript(interview_id: str):
-    ctx = _CONTEXTS.get(interview_id)
-    if ctx is None:
-        raise HTTPException(404, "interview not prepared")
+    ctx = _require_ctx(interview_id)
     items = _transcript_items(ctx)
     text = "\n\n".join(f"Q({it['section']}): {it['question']}\nA: {it['answer']}" for it in items)
     return {"items": items, "text": text, "meta": {"position": ctx.job.position, "company": ctx.job.company}}
@@ -455,9 +508,7 @@ def get_transcript(interview_id: str):
 
 @app.get("/api/interviews/{interview_id}/recap")
 def get_recap(interview_id: str):
-    ctx = _CONTEXTS.get(interview_id)
-    if ctx is None:
-        raise HTTPException(404, "interview not prepared")
+    ctx = _require_ctx(interview_id)
     sc = ctx.scorecard if (ctx.scorecard and ctx.scorecard.items) else finalize(ctx)
     lines = [f"这是你的模拟面试报告，综合得分 {sc.overall} 分。"]
     for m in sc.interviewer_os.missing_slots[:3]:

@@ -5,7 +5,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   const { id } = await params;
   try {
     const data = await startBooking(id);
-    return NextResponse.json(data, { status: 201 });
+    return NextResponse.json(data, { status: 202 });
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 400 });
   }

@@ -24,11 +24,21 @@ export default function Room() {
 
   const addTurn = (role: "ai" | "cand", text: string) => setConvo((c) => [...c, { role, text }]);
 
-  // on mount: load the first question (text) + speak it (voice start)
+  // on mount: load the first question (text) + speak it (voice start).
+  // If /start returned a "preparing" state, poll /next until the context is built.
   useEffect(() => {
     (async () => {
+      setQ("AI 面试官正在准备面试…");
       try {
-        const d = await (await fetch(`/api/interviews/${id}/next`)).json();
+        let d = null;
+        for (let i = 0; i < 60; i++) {
+          const r = await fetch(`/api/interviews/${id}/next`);
+          if (r.status === 404) { setQ("无法加载面试。"); return; }
+          d = await r.json();
+          if (d.status === "preparing") { await new Promise((res) => setTimeout(res, 2000)); continue; }
+          break;
+        }
+        if (!d || d.status === "preparing") { setQ("面试准备超时，请稍后重试。"); return; }
         setQ(d.question);
         setSection(d.section);
         if (d.question) addTurn("ai", d.question);

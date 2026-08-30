@@ -39,6 +39,10 @@ logger = logging.getLogger(__name__)
 HTTP_TIMEOUT = 8.0
 MAX_RETRIES = 1
 
+# Browser-backed providers (xhs/zhihu) are slow and serialize; only run each on
+# this many queries to keep cold-start bounded (see run_queries).
+BROWSER_MAX_QUERIES = 2
+
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -464,6 +468,12 @@ class XiaohongshuProvider(SearchProvider):
     def search(self, query: str, *, max_results: int = 8) -> list[Source]:
         if not self.enabled:
             return []
+        # Prefer the real-browser route (handles XHS runtime x-s/x-t signing),
+        # which the cookies enable. Fall back to HTTP page-scrape on failure.
+        from . import browser_search
+        got = browser_search.search_xhs(query, max_results=max_results)
+        if got:
+            return got
         out: list[Source] = []
         try:
             resp = httpx.get(
@@ -519,6 +529,11 @@ class ZhihuProvider(SearchProvider):
     def search(self, query: str, *, max_results: int = 8) -> list[Source]:
         if not self.enabled:
             return []
+        # Prefer the real-browser route (handles zhihu x-zse-96 signing).
+        from . import browser_search
+        got = browser_search.search_zhihu(query, max_results=max_results)
+        if got:
+            return got
         out: list[Source] = []
         try:
             resp = httpx.get(
@@ -600,9 +615,21 @@ def run_queries(
     if not providers or not queries:
         return []
     token = company_token(require_company_hits)
-    tasks: list[tuple[SearchProvider, str]] = [
-        (p, q) for p in providers if p.enabled for q in queries
-    ]
+    # Browser providers (xhs/zhihu) are slow (real Chromium) and serialize on a
+    # single worker thread, so only run them on the first N queries; the fast
+    # keyless engines still cover every query. This keeps cold-start bounded.
+    browser_providers = {"xiaohongshu", "zhihu"}
+    browser_seen: dict[str, int] = {}
+    tasks: list[tuple[SearchProvider, str]] = []
+    for p in providers:
+        if not p.enabled:
+            continue
+        for q in queries:
+            if p.name in browser_providers:
+                if browser_seen.get(p.name, 0) >= BROWSER_MAX_QUERIES:
+                    continue
+                browser_seen[p.name] = browser_seen.get(p.name, 0) + 1
+            tasks.append((p, q))
     results: list[Source] = []
     start = time.monotonic()
     try:
@@ -618,10 +645,14 @@ def run_queries(
                     logger.warning("researcher: provider task raised: %s", exc)
     except Exception as exc:  # noqa: BLE001
         logger.warning("researcher: run_queries failed: %s", exc)
-    # company-tagged sources first (stable sort) so the cap keeps the most
-    # valuable evidence for the profile prompt.
-    if token:
-        results.sort(key=lambda s: 0 if token in (s.title + s.snippet + s.url) else 1)
+    # Priority: keep the rarest / highest-signal providers ahead of generic
+    # search-engine results so a small `max_total` cap never drops xhs/zhihu
+    # (which complete last and hence sit at the tail of `results`).
+    _priority = {"xiaohongshu": 0, "zhihu": 1, "nowcoder": 2, "tavily": 3, "search-engine": 4}
+    results.sort(key=lambda s: (
+        _priority.get(s.provider, 5),
+        0 if token and token in (s.title + s.snippet + s.url) else 1,
+    ))
     sources = dedupe_sources(results, max_len=max_total)
     # company-hit tracking: count sources that mention the company token
     if token:
