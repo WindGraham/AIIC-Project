@@ -225,6 +225,26 @@ export default function Room() {
     } finally { setBusy(false); }
   }
 
+  // ---------- code submit（提交代码 -> 对话栏显示"提交代码" -> agent 判分回复） ----------
+  async function submitCode(code: string, language: string) {
+    // 在对话栏显示"提交代码"气泡（带代码内容），随后 agent 回复出现在下方。
+    addTurn("cand", `【提交代码】(${language})\n\`\`\`${language}\n${code}\n\`\`\``);
+    setBusy(true);
+    try {
+      const r = await fetch("/api/coding/judge", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ interview_id: id, code, language }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || d.error || `提交失败(${r.status})`);
+      const opinion = d.speech || `${d.status}${typeof d.score === "number" ? ` · ${d.score}/5` : ""}`;
+      addTurn("ai", opinion);
+      if (d.next_hint) addTurn("ai", "💡 提示：" + d.next_hint);
+    } catch (ex) {
+      addTurn("ai", "（提交代码失败，请重试：" + String(ex).slice(0, 90) + "）");
+    } finally { setBusy(false); }
+  }
+
   // ---------- PTT press/release ----------
   async function pttDown() {
     setPttTouch(true);
@@ -329,7 +349,7 @@ export default function Room() {
 
           {section === "coding" && !done && (
             <div className="mb-3">
-              <CodingPanel interviewId={id} />
+              <CodingPanel interviewId={id} onSubmit={submitCode} />
             </div>
           )}
 
