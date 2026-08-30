@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from .config import get_settings
 from .contracts import InterviewContext
+from .coding import judge_code, load_problem
 from .pipeline import ask_current, finalize, record_answer
 from .prep import build_plan
 from .stt import transcribe_flash
@@ -216,3 +217,39 @@ def voice_answer(req: VoiceAnswer):
     mp3 = synthesize(speak)
     return {"text": text, "spoken": speak, "next_question": nxt, "done": nxt is None,
             "audio_b64": base64.b64encode(mp3).decode()}
+
+
+# ---------------------------------------------------------------------------
+# Hand-code coding round: agent sees & judges the candidate's code
+# ---------------------------------------------------------------------------
+class CodingJudgeRequest(BaseModel):
+    interview_id: str
+    code: str = ""
+    language: str = "python"
+
+
+def _coding_question(ctx: InterviewContext):
+    return next((q for q in ctx.plan.questions if q.section == "coding"), None)
+
+
+@app.get("/api/interviews/{interview_id}/problem")
+def get_coding_problem(interview_id: str):
+    ctx = _CONTEXTS.get(interview_id)
+    if ctx is None:
+        raise HTTPException(404, "interview not prepared")
+    q = _coding_question(ctx)
+    if q is None:
+        return {"problem": None, "question_text": None}
+    prob = load_problem(q.problem_id)
+    return {"problem_id": q.problem_id, "question_text": q.text, "problem": prob}
+
+
+@app.post("/api/coding/judge")
+def coding_judge(req: CodingJudgeRequest):
+    ctx = _CONTEXTS.get(req.interview_id)
+    if ctx is None:
+        raise HTTPException(404, "interview not prepared")
+    q = _coding_question(ctx)
+    prob = load_problem(q.problem_id) if q else None
+    verdict = judge_code(prob, req.code, req.language)
+    return verdict
