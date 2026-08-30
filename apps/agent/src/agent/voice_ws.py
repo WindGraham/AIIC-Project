@@ -50,6 +50,22 @@ from .llm import LLM
 from .pipeline import ask_current
 from .tts import synthesize_stream_async
 
+
+def _flow_for(interview_id: str):
+    """Live per-interview flow from main, if the interview has been started/prepared.
+
+    Lazy import on purpose (main imports this module at startup). Degrades to None
+    when the interview is unknown so the WS never hard-crashes on a missing id.
+    """
+    if not interview_id:
+        return None
+    try:
+        from .main import _flow_for as _main_flow  # noqa: PLC0415
+
+        return _main_flow(interview_id)
+    except Exception:  # noqa: BLE001
+        return None
+
 logger = logging.getLogger("agent.voice_ws")
 
 #: sentinel pushed onto the turn queue to signal "end of this turn's audio"
@@ -272,25 +288,24 @@ class VoiceSession:
         asyncio.create_task(self._maybe_announce_question())
 
     async def _maybe_announce_question(self) -> None:
-        """If the interview has no answers yet, speak the current planned question.
+        """If the interview has no answers yet, speak the opening question.
 
-        Guarded by ``_announced`` so the opening is spoken exactly once, even
-        if the candidate's first mic frames trigger a barge-in mid-announce.
+        Guarded by ``_announced`` (and the flow's own idempotent opening_line) so the
+        opening is spoken exactly once, even if the candidate's first mic frames
+        trigger a barge-in mid-announce.
         """
         if self._announced:
             return
         try:
-            ctx = _ctx_for(self.interview_id)
+            flow = _flow_for(self.interview_id)
         except Exception:  # noqa: BLE001
-            ctx = None
-        if ctx is None:
+            flow = None
+        if flow is None:
             return
-        answered = len(getattr(ctx, "answers", []) or [])
-        if answered > 0:
-            self._announced = True
+        if flow.done:
             return
-        q = ask_current(ctx)
-        if not q or ctx.status == "complete":
+        q = flow.opening_line()  # idempotent; returns the self-intro request
+        if not q or flow.done:
             return
         self._announced = True
         await self._send({"type": "spoken", "text": q})
@@ -390,20 +405,28 @@ class VoiceSession:
         await self._send({"type": "done"})
 
     async def _next_interviewer_line(self, user_text: str) -> str:
-        """LLM.next interviewer line: persona + current question context +
-        the candidate's just-spoken answer. Advances the interview cursor so
-        the next turn is about the next planned question."""
+        """Per-round interviewer line from the LiveFlow agent: persona + resume +
+        this interview's requirements + FULL chat history. Advances the interview
+        (self-intro -> project -> probe -> coding -> wrap) with time awareness."""
+        try:
+            flow = _flow_for(self.interview_id)
+        except Exception:  # noqa: BLE001
+            flow = None
+        if flow is None:
+            # Fallback (interview not prepared/known): keep the old conversational line.
+            return self._legacy_next_line(user_text)
+        if flow.done:
+            return "面试已结束，感谢你的回答，可以查看你的报告了。"
+        # flow.next_line records the answer + a PlannedQuestion for scoring internally.
+        line = flow.next_line(user_text)
+        return line or "请继续，说说你的想法。"
+
+    async def _legacy_next_line(self, user_text: str) -> str:
+        """Backup conversational line when no LiveFlow exists (legacy path)."""
         ctx = _ctx_for(self.interview_id)
         q = ask_current(ctx) if ctx is not None else None
         if ctx is not None and q is None:
             return "面试已结束，感谢你的回答，可以查看你的报告了。"
-        if ctx is not None:
-            try:
-                from .pipeline import record_answer  # noqa: PLC0415
-
-                record_answer(ctx, user_text)
-            except Exception:  # noqa: BLE001
-                logger.warning("record_answer failed", exc_info=True)
         persona = _persona_prompt(getattr(ctx, "persona", "high-peer") if ctx is not None else "high-peer")
         system = (
             persona

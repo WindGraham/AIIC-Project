@@ -15,11 +15,15 @@ from pydantic import BaseModel, Field
 
 from .config import get_settings
 from .store import PERSONA_LEVELS, get_store
+
+# Interview modes selectable at booking: text chat / push-to-talk / full-duplex.
+MODES = ("text", "ptt", "duplex")
 from .contracts import InterviewContext
 from .coding import judge_code, load_problem
 from .llm import LLM
 from .pipeline import ask_current, current_question, finalize, record_answer
 from .prep import build_plan
+from .liveflow import LiveFlow
 from .stt import transcribe_flash
 from .tts import synthesize
 from .voice_ws import voice_ws_handler
@@ -35,6 +39,9 @@ logger = logging.getLogger("agent.main")
 
 # in-memory contexts keyed by interview id (transient per live run)
 _CONTEXTS: dict[str, InterviewContext] = {}
+# per-interview live interviewer flow (time-aware, per-round agent). Created lazily
+# when a live turn first happens, keyed by the same interview id.
+_FLOWS: dict[str, LiveFlow] = {}
 _MAX_CONTEXTS = 500  # guard against unbounded memory growth from unauthed prep
 # Background prep executor + pending set: /start returns immediately with a
 # "preparing" state while build_plan (search + LLM) runs in a worker thread.
@@ -45,6 +52,9 @@ _PENDING: set[str] = set()
 # interview_id -> owner user_id, set at /start. Used to gate the live interview
 # endpoints & /report persistence to the interviewer's owner (cross-user safety).
 _OWNER: dict[str, str] = {}
+# interview_id -> booking-derived live config (has_coding/notes/scenario/persona),
+# captured at /start so the flow uses the right structure (e.g. skip coding round).
+_BOOKING_CFG: dict[str, dict[str, Any]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +74,7 @@ class Booking(BaseModel):
     has_coding: bool = True
     scenario: str = "algorithm"  # algorithm | retest(保研复试占位)
     persona: str = "high-peer"   # peer | high-peer | manager
+    mode: str = "duplex"         # text | ptt | duplex (面试方案)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -176,6 +187,9 @@ def book_interview(payload: Booking, user: dict = Depends(_auth_user)):
     # interviewer-planning LLM via the persona field).
     if payload.persona not in PERSONA_LEVELS:
         payload.persona = "high-peer"
+    # Validate interview mode (text | ptt | duplex).
+    if payload.mode not in MODES:
+        payload.mode = "duplex"
     if not payload.name:
         payload.name = f"{payload.position or '模拟'}面试"
     get_store().save_booking(user["id"], payload.model_dump())
@@ -214,6 +228,12 @@ def start_interview(booking_id: str, user: dict = Depends(_auth_user)):
     persona = b.get("persona", "high-peer") if b.get("persona") in PERSONA_LEVELS else "high-peer"
     _PENDING.add(iid)
     _OWNER[iid] = user["id"]
+    _BOOKING_CFG[iid] = {
+        "has_coding": bool(b.get("has_coding", True)),
+        "notes": b.get("notes", ""),
+        "scenario": b.get("scenario", "algorithm"),
+        "persona": persona,
+    }
 
     def _do_start():
         """Run build_plan (search + LLM) in a worker; store the context when done."""
@@ -375,6 +395,33 @@ def _require_ctx(interview_id: str) -> InterviewContext:
     return ctx
 
 
+def _flow_for(interview_id: str, *, has_coding: bool | None = None, notes: str | None = None,
+              scenario: str | None = None, group_min: int | None = None,
+              coding_min: int | None = None) -> LiveFlow:
+    """Lazily create (once) the per-interview LiveFlow and cache it.
+
+    Booking-derived config (captured at /start) is preferred; explicit args override.
+    """
+    flow = _FLOWS.get(interview_id)
+    if flow is None:
+        ctx = _require_ctx(interview_id)
+        cfg = _BOOKING_CFG.get(interview_id, {})
+        flow = LiveFlow(
+            ctx,
+            has_coding=has_coding if has_coding is not None else bool(cfg.get("has_coding", True)),
+            notes=notes if notes is not None else str(cfg.get("notes", "")),
+            scenario=scenario if scenario is not None else str(cfg.get("scenario", "algorithm")),
+            group_min=group_min if group_min is not None else 40,
+            coding_min=coding_min if coding_min is not None else 20,
+        )
+        # Ensure the persona in the context matches what the user chose at booking.
+        persona = cfg.get("persona")
+        if persona and persona in PERSONA_LEVELS:
+            flow.ctx.persona = persona
+        _FLOWS[interview_id] = flow
+    return flow
+
+
 def _check_owner(interview_id: str, user: Optional[dict[str, Any]] = None) -> None:
     """Raise 403 if the interview has a recorded owner and the caller isn't it.
 
@@ -392,18 +439,36 @@ def next_question(interview_id: str, user: Optional[dict] = Depends(_optional_us
     ctx, preparing = _ctx(interview_id)
     if preparing:
         return {"status": "preparing", "question": None, "done": False, "section": None}
-    q = ask_current(ctx)
-    cq = current_question(ctx)
-    return {"question": q, "done": q is None, "section": cq.section if cq else None}
+    # Every live interview is driven by the per-round LiveFlow agent.
+    flow = _flow_for(interview_id)
+    opening = flow.opening_line()  # idempotent
+    return {
+        "question": opening,
+        "done": flow.done,
+        "section": flow.section_for_ui(),
+        "phase": flow.phase,
+        "liveflow": True,
+    }
 
 
 @app.post("/api/interviews/{interview_id}/answer")
 def answer(interview_id: str, req: dict, user: dict = Depends(_auth_user)):
     _check_owner(interview_id, user)
-    ctx = _require_ctx(interview_id)
-    nxt = record_answer(ctx, str(req.get("answer", "")))
-    cq = current_question(ctx)
-    return {"next_question": nxt, "done": nxt is None, "section": cq.section if cq else None}
+    _require_ctx(interview_id)
+    txt = str(req.get("answer", "")).strip()
+    flow = _flow_for(interview_id)
+    if not txt:
+        # No text yet: (re)seed the opening question.
+        opening = flow.opening_line()
+        return {"next_question": opening, "done": flow.done, "section": flow.section_for_ui(),
+                "phase": flow.phase}
+    if not flow.opened:
+        # The candidate answered before the agent spoke (defensive): open first,
+        # then treat the text as this first answer.
+        flow.opening_line()
+    nxt = flow.next_line(txt)
+    return {"next_question": nxt, "done": flow.done, "section": flow.section_for_ui(),
+            "phase": flow.phase}
 
 
 @app.get("/api/interviews/{interview_id}/report")
@@ -483,25 +548,34 @@ def voice_stt(req: STTCall):
 def voice_answer(req: VoiceAnswer, user: dict = Depends(_auth_user)):
     _check_owner(req.interview_id, user)
     ctx = _require_ctx(req.interview_id)
-    q = ask_current(ctx)
-    if q is None:
-        sc = finalize(ctx)
-        mp3 = synthesize("面试结束，感谢你的回答，可以查看你的报告了。")
-        return {"done": True, "text": "", "spoken": "面试结束，感谢你的回答。", "next_question": None,
-                "audio_b64": base64.b64encode(mp3).decode(), "report": True}
+    flow = _flow_for(req.interview_id)
+    # When the AI is speaking (opening or follow-up), a candidate turn may begin
+    # with the user pressing PTT. If the flow hasn't opened yet, open first.
+    if not flow.opened:
+        opening = flow.opening_line()
+        mp3 = synthesize(opening)
+        return {"text": "", "spoken": opening, "next_question": opening, "done": flow.done,
+                "audio_b64": base64.b64encode(mp3).decode(), "section": flow.section_for_ui(),
+                "phase": flow.phase, "opening": True}
     if req.audio_b64:
         try:
             text = transcribe_flash(req.audio_b64, req.format)
         except Exception:
             text = ""
-        nxt = record_answer(ctx, text)
+        if not text:
+            # Nothing recognized: return the current question but do NOT advance.
+            cur = next((t["content"] for t in reversed(flow.turns) if t.get("role") == "assistant"), "")
+            mp3 = synthesize(cur or flow.opening_line())
+            return {"text": "", "spoken": cur, "next_question": cur, "done": flow.done,
+                    "audio_b64": base64.b64encode(mp3).decode(), "section": flow.section_for_ui(),
+                    "phase": flow.phase}
+        speak = flow.next_line(text)
     else:
-        text, nxt = "", q  # start turn: speak the current question
-    speak = nxt if nxt else "面试结束，感谢你的回答，可以查看你的报告了。"
+        speak = flow.opening_line()
     mp3 = synthesize(speak)
-    cq = current_question(ctx)
-    return {"text": text, "spoken": speak, "next_question": nxt, "done": nxt is None,
-            "audio_b64": base64.b64encode(mp3).decode(), "section": cq.section if cq else None}
+    return {"text": req.audio_b64 and "…" or "", "spoken": speak, "next_question": speak,
+            "done": flow.done, "audio_b64": base64.b64encode(mp3).decode(),
+            "section": flow.section_for_ui(), "phase": flow.phase}
 
 
 @app.websocket("/ws/voice")
