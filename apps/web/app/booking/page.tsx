@@ -10,6 +10,12 @@ const PERSONAS = [
   { value: "manager", label: "主管", desc: "正式有压迫感，重全局判断与 owner-ship" },
 ];
 
+const MODES = [
+  { value: "duplex", label: "真实对话", desc: "麦克风常开、边说边答，AI 实时语音 (像打电话)" },
+  { value: "ptt", label: "按住说话", desc: "按住麦克风说完再松手，更稳定、不易误触发" },
+  { value: "text", label: "文字对话", desc: "打字一问一答，最稳定，适合快速练习" },
+];
+
 export default function Booking() {
   const router = useRouter();
   const [resumes, setResumes] = useState<Resume[]>([]);
@@ -25,6 +31,7 @@ export default function Booking() {
     has_coding: true,
     scenario: "algorithm",
     persona: "high-peer",
+    mode: "duplex",
   });
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -141,6 +148,21 @@ export default function Booking() {
               <option value="retest">保研复试</option>
             </select>
           </label>
+        </div>
+
+        <div className="flex flex-col gap-1 text-sm">
+          <span>面试方案</span>
+          <div className="grid grid-cols-3 gap-2">
+            {MODES.map((m) => (
+              <button type="button" key={m.value} onClick={() => setF((s) => ({ ...s, mode: m.value }))}
+                className={`rounded-lg border p-3 text-left transition-colors ${
+                  f.mode === m.value ? "border-indigo-400 bg-indigo-500/15" : "border-white/10 hover:border-white/30"
+                }`}>
+                <div className="font-medium text-sm">{m.label}</div>
+                <div className="text-xs text-white/40 mt-1">{m.desc}</div>
+              </button>
+            ))}
+          </div>
         </div>
 
         <label className="flex items-center gap-2 text-sm">

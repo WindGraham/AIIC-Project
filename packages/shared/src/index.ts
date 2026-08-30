@@ -164,6 +164,7 @@ export const InterviewContext = z.object({
   }),
   status: z.enum(["prep", "live", "post", "complete"]),
   persona: z.enum(["peer", "high-peer", "manager"]).optional(),
+  mode: z.enum(["text", "ptt", "duplex"]).optional(),
   memory_brief: z.string().optional(),
 });
 export type InterviewContext = z.infer<typeof InterviewContext>;

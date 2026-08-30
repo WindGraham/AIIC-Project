@@ -55,7 +55,7 @@ export default function Interviews() {
     const r = await fetch(`/api/interviews/${b.id}/start`, { method: "POST" });
     const d = await r.json();
     if (!r.ok) { alert(d.error || "进入失败"); return; }
-    router.push(`/room/${d.interview_id}`);
+    router.push(`/room/${d.interview_id}?mode=${encodeURIComponent(b.mode || "duplex")}`);
   }
 
   return (
@@ -76,6 +76,7 @@ export default function Interviews() {
                 <div className="text-xs text-white/40 mt-1">
                   {b.company} · {b.position} · {b.scenario === "retest" ? "保研复试" : "算法/研发"} · 人格：{
                     { peer: "同级", "high-peer": "资深同级", manager: "主管" }[b.persona] || b.persona}
+                  {" · "}{{ text: "文字对话", ptt: "按住说话", duplex: "真实对话" }[b.mode] || b.mode}
                 </div>
                 <div className={`text-sm mt-1 ${st.cls}`}>{st.label} · 距开始 {fmt(b.seconds_until_start || 0)}</div>
                 {b.has_coding && <div className="text-xs text-white/40 mt-1">含手撕代码</div>}

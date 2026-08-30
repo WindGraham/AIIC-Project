@@ -117,6 +117,7 @@ export type Booking = {
   has_coding: boolean;
   scenario: string;
   persona: string;
+  mode: string;
   created_at: string;
   seconds_until_start?: number;
   status?: string;

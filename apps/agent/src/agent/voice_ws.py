@@ -418,7 +418,8 @@ class VoiceSession:
         if flow.done:
             return "面试已结束，感谢你的回答，可以查看你的报告了。"
         # flow.next_line records the answer + a PlannedQuestion for scoring internally.
-        line = flow.next_line(user_text)
+        # It is a BLOCKING LLM call — run it off the event loop.
+        line = await asyncio.to_thread(flow.next_line, user_text)
         return line or "请继续，说说你的想法。"
 
     async def _legacy_next_line(self, user_text: str) -> str:
