@@ -628,8 +628,8 @@ def screen_note(interview_id: str, req: dict, user: dict = Depends(_auth_user)):
     flow = _flow_for(interview_id)
     text = str(req.get("text", "")).strip()
     if text:
-        # Cap the note so it stays a concise context hint, not the transcript.
-        flow.screen_note = text[:1000]
+        # 前端已用 Gemini/Kimi 把屏幕帧读成文字，这里直接累积成"看屏幕"旁注。
+        flow.add_screen_note(text[:400])
     return {"ok": True}
 
 
@@ -805,9 +805,51 @@ class VisionCall(BaseModel):
 @app.post("/api/vision/analyze")
 def vision_analyze(req: VisionCall):
     try:
-        return {"description": LLM().vision(req.prompt, req.image_b64, req.mime)}
+        llm = LLM()
+        # Prefer Kimi Code K2.7 for screen reading (fast, stable); fall back to Gemini.
+        if get_settings().kimi_api_key:
+            return {"description": llm.vision_kimi(req.prompt, req.image_b64, req.mime)}
+        return {"description": llm.vision(req.prompt, req.image_b64, req.mime)}
     except Exception as e:
         return {"description": "", "error": str(e)}
+
+
+@app.post("/api/vision/analyze-batch")
+async def vision_analyze_batch(req: dict):
+    """并发读多帧屏幕图（video stream 的"一帧一帧看"）。返回每帧的描述。
+
+    req: {frames: [{data, mime}...], prompt?}  并发上限 ~10。
+    前端把返回的描述逐条 POST 到 /screen-note，agent 拿到连续画面旁注。
+    """
+    import asyncio
+    import concurrent.futures as cf
+
+    frames = req.get("frames") if isinstance(req.get("frames"), list) else []
+    if not frames:
+        raise HTTPException(400, "no frames")
+    prompt = str(req.get("prompt", "这是屏幕录屏的一帧。用一句中文简述画面最重要内容，不超过30字。"))
+    llm = LLM()
+    use_kimi = bool(get_settings().kimi_api_key)
+
+    def one(fr: dict) -> str:
+        b64 = str(fr.get("data", ""))
+        mime = str(fr.get("mime", "image/jpeg"))
+        if not b64:
+            return ""
+        try:
+            if use_kimi:
+                return llm.vision_kimi(prompt, b64, mime, timeout=60)
+            return llm.vision(prompt, b64, mime, timeout=60)
+        except Exception as exc:  # noqa: BLE001
+            return f"(reading failed: {exc})"
+
+    # True concurrency: submit each frame's vision call to a thread pool and await
+    # them all together (ThreadPoolExecutor.map is lazy -> would serialize; use submit).
+    loop = asyncio.get_running_loop()
+    with cf.ThreadPoolExecutor(max_workers=min(10, len(frames))) as ex:
+        futs = [loop.run_in_executor(ex, lambda fr=fr: one(fr)) for fr in frames[:10]]
+        results = await asyncio.gather(*futs)
+    return {"frames": [{"index": i, "description": r} for i, r in enumerate(results)]}
 
 
 # ---------------------------------------------------------------------------

@@ -73,3 +73,40 @@ class LLM:
         d = r.json()
         parts = d["candidates"][0]["content"]["parts"]
         return "".join(p.get("text", "") for p in parts)
+
+    # ---- Kimi Code K2.7 vision (OpenAI-compatible image_url) ------------------
+    @staticmethod
+    def _mime_b64(mime: str, image_b64: str) -> str:
+        if image_b64.startswith("data:"):
+            return image_b64
+        return f"data:{mime};base64,{image_b64}"
+
+    def vision_kimi(self, prompt: str, image_b64: str, mime: str = "image/jpeg", *,
+                    timeout: float = 90.0) -> str:
+        """One image -> text, via Kimi Code (OpenAI-compatible /chat/completions)."""
+        content = [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": self._mime_b64(mime, image_b64)}}]
+        payload = {"model": self.settings.kimi_model, "messages": [{"role": "user", "content": content}], "max_tokens": 512}
+        r = httpx.post(
+            f"{self.settings.kimi_base_url}/chat/completions",
+            json=payload,
+            headers={"Authorization": f"Bearer {self.settings.kimi_api_key}", "Content-Type": "application/json"},
+            timeout=timeout,
+        )
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"]
+
+    def vision_kimi_multi(self, prompt: str, images: list[tuple[str, str]], *,
+                          timeout: float = 120.0) -> str:
+        """Multiple images in ONE request (streaming context). images = [(b64, mime), ...]."""
+        content: list[dict] = [{"type": "text", "text": prompt}]
+        for b64, mime in images:
+            content.append({"type": "image_url", "image_url": {"url": self._mime_b64(mime, b64)}})
+        payload = {"model": self.settings.kimi_model, "messages": [{"role": "user", "content": content}], "max_tokens": 512}
+        r = httpx.post(
+            f"{self.settings.kimi_base_url}/chat/completions",
+            json=payload,
+            headers={"Authorization": f"Bearer {self.settings.kimi_api_key}", "Content-Type": "application/json"},
+            timeout=timeout,
+        )
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"]

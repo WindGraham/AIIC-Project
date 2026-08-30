@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     gemini_base_url: str = "https://api.aixhan.com/v1beta"
     gemini_model: str = "gemini-3.5-flash"
 
+    # --- Vision (Kimi Code K2.7, OpenAI-compatible image_url) 屏幕读屏 ---
+    kimi_api_key: str = ""
+    kimi_base_url: str = "https://api.kimi.com/coding/v1"
+    kimi_model: str = "kimi-for-coding"
+
     # --- STT (Volcengine bigmodel) ---
     volcengine_api_key: str = ""
     volcengine_asr_resource_id: str = "volc.seedasr.sauc.duration"  # streaming

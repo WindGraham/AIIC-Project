@@ -1,91 +1,103 @@
 /**
- * ScreenFeed — 当候选人开了摄像头或共享屏时，周期性采样画面帧 → Gemini 视觉读屏 →
- * 把得到的文本作为"看屏幕"旁注喂给 agent (POST /api/interviews/{id}/screen-note)。
+ * ScreenFeed — 候选人的摄像头/共享屏实时画面 → 读屏（逐帧即时流）。
  *
- * 与前端的 livekit-room store 一起：开摄像头/共享即自动开始读屏，关上即停止。
+ * 每 2s 取一帧（原图，不缩图）→ 立刻单独发给 Kimi 读屏 → 结果即时 POST /screen-note。
+ * 采用"帧回完再发下一帧"的串行流：一张结果回来后，立即取最新的下一帧发送。
+ * 这样不会因 Kimi(单帧~5s) 延迟而积压请求，且永远发送最新画面，agent 拿到连续旁注。
  */
 
 import { getLiveKitRoom } from "@/lib/livekit-room";
 
-const SCREEN_PROMPT =
-  "你是一位 AI 面试官，正在实时观看候选人共享的屏幕/摄像头画面。请用简短中文描述画面上与面试相关的最重要内容（代码/文字/图表），不要评论人物。";
+const PROMPT = "这是屏幕实时画面的一帧。用一句中文简述画面中与面试相关的最重要内容，不超过30字。";
+const FRAME_MS = 2000;      // 每 2 秒取一帧（Kimi 单帧 ~5s，串行逐帧，不缩图）
+const MAX_INFLIGHT = 1;     // 串行：一次只有 1 帧在飞
 
-let interval: number | null = null;
-let lastSent = 0;
 let stoppedRef = false;
 let interviewIdRef = "";
+let captureTimer: number | null = null;
+let latestFrame: { data: string; mime: string } | null = null;
+let inflight = 0;
+let sending = false;
+let lastSent = new Date(0);
 
-function toJpegB64(video: HTMLVideoElement, maxW = 960): string {
-  const scale = Math.min(1, maxW / video.videoWidth);
+function toJpegB64(video: HTMLVideoElement): string {
+  // 原图直出，不缩图（Kimi 支持原图；保持画面细节以便准确读屏）。
   const canvas = document.createElement("canvas");
-  canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
-  canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+  canvas.width = Math.max(1, video.videoWidth);
+  canvas.height = Math.max(1, video.videoHeight);
   canvas.getContext("2d")!.drawImage(video, 0, 0, canvas.width, canvas.height);
-  return canvas.toDataURL("image/jpeg", 0.7).split(",")[1];
+  return canvas.toDataURL("image/jpeg", 0.8).split(",")[1];
 }
 
-async function sample() {
+/** 每 2s 取最新一帧（只保留最新；旧的被覆盖）。 */
+async function capture() {
   if (stoppedRef) return;
   const room = getLiveKitRoom();
   if (!room) return;
-  // Only sample when the candidate is publishing camera or screen-share video.
   const pubs = room.localParticipant.getTrackPublications();
   const hasVideo = pubs.some((p) => p.track?.kind === "video");
   if (!hasVideo) return;
 
   const scr = pubs.find((p) => p.track?.kind === "video" && (p.source as string) === "screen_share");
-  const srcTrack = scr?.track?.mediaStreamTrack || pubs.find((p) => p.track?.kind === "video")?.track?.mediaStreamTrack;
-  if (!srcTrack) return;
+  const src = scr?.track?.mediaStreamTrack || pubs.find((p) => p.track?.kind === "video")?.track?.mediaStreamTrack;
+  if (!src) return;
 
-  const video = document.createElement("video");
-  video.srcObject = new MediaStream([srcTrack]);
-  video.autoplay = true;
-  video.muted = true;
-  video.playsInline = true;
-  await video.play().catch(() => {});
-  await new Promise((r) => setTimeout(r, 600)); // let metadata load
-  if (stoppedRef || video.videoWidth === 0) return;
-
-  const now = Date.now();
-  if (now - lastSent < 5000) return; // throttle ~5s
-  lastSent = now;
-
+  const v = document.createElement("video");
+  v.srcObject = new MediaStream([src]);
+  v.autoplay = true; v.muted = true; v.playsInline = true;
+  await v.play().catch(() => {});
+  await new Promise((r) => setTimeout(r, 300));
+  if (stoppedRef || v.videoWidth === 0) return;
   try {
-    const b64 = toJpegB64(video);
-    const v = await (
-      await fetch("/api/vision/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image_b64: b64, prompt: SCREEN_PROMPT }),
-      })
-    ).json();
-    const desc: string = v?.description || "";
-    if (desc) {
-      // Feed the description to the agent as a screen side-note.
-      await fetch(`/api/interviews/${encodeURIComponent(interviewIdRef)}/screen-note`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: desc }),
-      });
-    }
+    latestFrame = { data: toJpegB64(v), mime: "image/jpeg" };
   } catch {
-    /* keep sampling on next tick */
+    latestFrame = null;
   }
 }
 
-/** Start sampling (call when camera/screen turns on — or unconditionally on mount). */
+/** 串行发送：上一帧结果回来后，立即发最新的下一帧。 */
+async function drain() {
+  if (stoppedRef || sending || inflight >= MAX_INFLIGHT) return;
+  if (!latestFrame) return;
+  // 有结果回来才发下一帧（避免积压）。
+  if (Date.now() - lastSent.getTime() < FRAME_MS) return;
+  sending = true;
+  const fr = latestFrame;
+  latestFrame = null;
+  inflight++;
+  try {
+    const r = await fetch("/api/vision/analyze", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image_b64: fr.data, mime: fr.mime, prompt: PROMPT }),
+    });
+    const d = await r.json();
+    const desc: string = d?.description || "";
+    lastSent = new Date();
+    if (desc && !desc.startsWith("(reading failed") && !d?.error) {
+      await fetch(`/api/interviews/${encodeURIComponent(interviewIdRef)}/screen-note`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: desc }),
+      }).catch(() => {});
+    }
+  } catch {
+    lastSent = new Date();
+  } finally {
+    inflight--;
+    sending = false;
+  }
+}
+
 export function startScreenFeed(interviewId: string) {
   interviewIdRef = interviewId;
   stoppedRef = false;
-  if (interval) window.clearInterval(interval);
-  interval = window.setInterval(() => sample(), 4500);
+  if (captureTimer) window.clearInterval(captureTimer);
+  captureTimer = window.setInterval(capture, FRAME_MS);
+  void drain();
+  window.setInterval(drain, 600);
 }
 
-/** Stop sampling. */
 export function stopScreenFeed() {
   stoppedRef = true;
-  if (interval) {
-    window.clearInterval(interval);
-    interval = null;
-  }
+  if (captureTimer) { window.clearInterval(captureTimer); captureTimer = null; }
+  latestFrame = null;
 }

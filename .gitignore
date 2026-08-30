@@ -55,3 +55,11 @@ apps/agent/src/agent/data/store.json
 
 # deployment private key (never commit; only the .pub is committed)
 deploy/*_ed25519
+
+# large local media (recordings/demo, never commit)
+*.mov
+*.webm
+*.mkv
+*.avi
+提交文件/录屏*
+提交文件/demo视频/*.mp4

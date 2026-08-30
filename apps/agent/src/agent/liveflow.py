@@ -162,7 +162,9 @@ class LiveFlow:
         self._qseq = 0
         self._opened = False  # the opening self-intro has been spoken once
         self._asked_in_state: str = "intro"  # state in which the LAST question was asked
-        self.screen_note: str = ""  # 实时"看屏幕"旁注（摄像头/共享开启时由前端喂养给 agent）
+        self.screen_note: str = ""  # 实时"看屏幕"旁注（最近一条）
+        self.screen_notes: list[str] = []  # 累积的"看屏幕"旁注（最近 N 条，保留时间轴）
+        self.max_screen_notes = 12
 
         self.ctx.status = "live"
         self.ctx.cursor = 0
@@ -301,6 +303,23 @@ class LiveFlow:
             return "（尚无对话）"
         return "\n".join(f"[{'面试官' if t['role'] == 'assistant' else '候选人'}] {t['content']}" for t in self.turns)
 
+    def add_screen_note(self, text: str) -> None:
+        """Append a screen-reading note (keep a rolling window of recent frames)."""
+        text = (text or "").strip()
+        if not text:
+            return
+        self.screen_note = text[:1000]
+        self.screen_notes.append(text[:400])
+        if len(self.screen_notes) > self.max_screen_notes:
+            self.screen_notes = self.screen_notes[-self.max_screen_notes:]
+
+    def screen_context(self) -> str:
+        """The rolling window of screen notes, newest-first, for the agent prompt."""
+        if not self.screen_notes:
+            return ""
+        joined = "\n".join(f"- {t}" for t in self.screen_notes[-self.max_screen_notes:])
+        return f"{joined}\n(最近一帧) {self.screen_note}"
+
     def _ask_agent(self) -> str:
         """Build the full per-round prompt and ask the LLM for the next line."""
         state = self.state
@@ -321,7 +340,7 @@ class LiveFlow:
             f"【候选人简历】\n{_candidate_brief(self.ctx)}\n"
             f"【本场特点】\n{_requirements_brief(self.ctx, self.notes, self.scenario)}\n"
             f"{('【跨场记忆】' + memory) if memory else ''}\n"
-            + (f"【候选人当前屏幕/摄像头看到的内容（旁注）】\n{self.screen_note}\n" if self.screen_note else "")
+            + (f"【候选人当前屏幕/摄像头看到的内容（旁注，连续画面）】\n{self.screen_context()}\n" if self.screen_notes else "")
             + "【最重要的面试要求 —— 像真人一样对话】\n"
             "- 你是在跟候选人**对话**，不是在念稿。**你的下一句必须直接回应候选人刚说的那句话**：\n"
             "   · 候选人说了具体内容 → 针对它真诚地追问（如\"你提到用Seata，能具体说说它的全局锁怎么处理吗？\"）。\n"
