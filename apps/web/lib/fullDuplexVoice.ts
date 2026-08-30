@@ -50,7 +50,7 @@ export interface FullDuplexCallbacks {
   /** Committed candidate turn — add to the conversation as "我". */
   onFinal?: (text: string) => void;
   /** Interviewer line — add to the conversation as "面试官". */
-  onSpoken?: (text: string) => void;
+  onSpoken?: (text: string, section?: string, phase?: string) => void;
   /** Raw incoming audio chunk (already queued by the engine; informational). */
   onAudio?: (base64: string) => void;
   /** The agent signalled the interview is over. */
@@ -260,7 +260,7 @@ export function createFullDuplex(interviewId: string, callbacks: FullDuplexCallb
         }
         break;
       case "spoken":
-        if (str("text")) callbacks.onSpoken?.(str("text"));
+        if (str("text")) callbacks.onSpoken?.(str("text"), str("section") || undefined, str("phase") || undefined);
         break;
       case "audio": {
         const b64 = str("base64") || str("audio_b64") || str("data");
@@ -271,7 +271,11 @@ export function createFullDuplex(interviewId: string, callbacks: FullDuplexCallb
         break;
       }
       case "done":
+        // `done` = the WHOLE interview is over (the agent said so). Stop & show report.
         callbacks.onDone?.();
+        break;
+      case "end_turn":
+        // Normal end of one spoken turn — keep listening for the next result.
         break;
       case "error":
         // non-fatal provider error (e.g. one STT/TTS call failed) — keep listening

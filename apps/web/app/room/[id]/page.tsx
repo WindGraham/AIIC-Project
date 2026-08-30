@@ -34,7 +34,7 @@ function useVoiceEngine(
   interviewId: string,
   handlers: {
     onFinal: (t: string) => void;
-    onSpoken: (t: string) => void;
+    onSpoken: (t: string, section?: string, phase?: string) => void;
     onDone: () => void;
     onStatus: (s: MicState) => void;
   },
@@ -50,7 +50,7 @@ function useVoiceEngine(
     const engine = createFullDuplex(interviewId, {
       onPartial: () => {},
       onFinal: (t) => { if (!cancelled) handlers.onFinal(t); },
-      onSpoken: (t) => { if (!cancelled) handlers.onSpoken(t); },
+      onSpoken: (t, section, phase) => { if (!cancelled) handlers.onSpoken(t, section, phase); },
       onAudio: () => {},
       onDone: () => { if (!cancelled) handlers.onDone(); },
       onStatus: (s) => {
@@ -118,11 +118,12 @@ export default function Room() {
   // voice engine handlers (shared between duplex + ptt)
   const voiceHandlersRef = useRef({
     onFinal: (t: string) => { setPartial(""); const x = t.trim(); if (x) addTurn("cand", x); },
-    onSpoken: (t: string) => {
+    onSpoken: (t: string, section?: string, phase?: string) => {
       const x = t.trim();
       if (!x || x === lastAiRef.current) return; // dedupe agent's opening line
       addTurn("ai", x);
       setQ(x);
+      if (section) setSection(section);
     },
     onDone: () => setDone(true),
     onStatus: (s: MicState) => setMic(s),
@@ -130,7 +131,7 @@ export default function Room() {
 
   const voice = useVoiceEngine(mode, id, {
     onFinal: (t) => voiceHandlersRef.current.onFinal(t),
-    onSpoken: (t) => voiceHandlersRef.current.onSpoken(t),
+    onSpoken: (t, section, phase) => voiceHandlersRef.current.onSpoken(t, section, phase),
     onDone: () => voiceHandlersRef.current.onDone(),
     onStatus: (s) => voiceHandlersRef.current.onStatus(s),
   });

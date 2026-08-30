@@ -110,6 +110,8 @@ class LiveFlow:
         scenario: str = "algorithm",
         group_min: int = DEFAULT_GROUP_MIN,
         coding_min: int = DEFAULT_CODING_MIN,
+        probe_max_turns: int = 8,
+        coding_max_turns: int = 5,
     ):
         self.ctx = ctx
         self.lang = lang
@@ -119,6 +121,10 @@ class LiveFlow:
         self.group_min = int(group_min or DEFAULT_GROUP_MIN)
         self.coding_min = int(coding_min or DEFAULT_CODING_MIN)
         self.total_min = self.group_min + self.coding_min
+        # Turn-based safety caps: in a fast demo/test the interview must still reach
+        # coding + wrap (a real 40/20-min interview is bounded by time, not by these).
+        self.probe_max_turns = int(probe_max_turns or 8)
+        self.coding_max_turns = int(coding_max_turns or 5)
 
         self.turns: list[dict[str, str]] = []  # full chat history [{role, content}]
         self.started_at = time.monotonic()
@@ -204,25 +210,23 @@ class LiveFlow:
         This is the per-round agent: it rebuilds a full prompt (identity + resume +
         requirements + memory + FULL history) every turn.
         """
+        if self.done:
+            return "面试已结束，感谢你的回答，可以查看你的报告了。"
+
         user_text = (candidate_text or "").strip() or "(未作答)"
         self.turns.append({"role": "user", "content": user_text})
 
         # Record the candidate's answer + the question it answers (for scoring).
         self._record_answer(user_text)
 
-        # Decide how to move, then ask the agent for the line.
+        # Ask the agent for the line in the CURRENT phase.
         line = self._ask_agent()
         if not line:
             line = self._fallback_line()
         self.turns.append({"role": "assistant", "content": line})
 
-        # Advance the director.
+        # Advance the director AFTER speaking, so a wrap-up line is generated first.
         self._advance_phase()
-        if self.phase == "coding" and not self.coding_announced:
-            self.coding_announced = True
-            self.coding_elapsed_start = time.monotonic()
-        if self.phase == "wrap" and self.phase_index >= len(self._ordered_phases()) - 1:
-            self.done = True
 
         return line
 
@@ -328,34 +332,60 @@ class LiveFlow:
 
         - Hard time cap: if the whole group budget is consumed and we are not yet
           in coding/wrap, force the move so the interview is never late.
-        - intro -> project -> probe each advance after the first answer; probe stays
-          (the agent decides depth), then coding/wrap are time-driven.
+        - Turn-based caps: probe exits after ``probe_max_turns`` answers and coding
+          after ``coding_max_turns`` answers (a fast demo/test still reaches the
+          hand-code round + wrap without waiting a real 40/20 minutes).
+        - intro -> project -> probe each advance after their first answer.
+        - `done` is set only when leaving wrap, so the wrap-up line is spoken first.
         """
         ordered = self._ordered_phases()
         idx = self.phase_index if self.phase_index < len(ordered) else len(ordered) - 1
         cur = ordered[idx]
 
+        # (0) If the interview is already wrapped up, never re-enter.
+        if self.done:
+            return
+
         # (1) Hard group time cap -> push toward coding / wrap.
         if cur in ("intro", "project", "probe") and self._group_elapsed_min() >= self.group_min:
-            nxt = min(idx + 1, len(ordered) - 1)
-            self._enter_phase(ordered, nxt)
-            if nxt == idx:
-                self.done = True
-            return
-
-        # (2) Coding phase: advance to wrap after the coding budget.
-        if cur == "coding":
-            if self.coding_elapsed_start is not None and (time.monotonic() - self.coding_elapsed_start) / 60.0 >= self.coding_min:
-                self._enter_phase(ordered, min(idx + 1, len(ordered) - 1))
-            return
-
-        # (3) Natural advance for short-lived phases after first answer.
-        budget = {"intro": 1, "project": 1, "wrap": 1}
-        if cur in budget and self._phase_user_count() >= budget[cur]:
             self._enter_phase(ordered, min(idx + 1, len(ordered) - 1))
             return
 
-        # (4) probe: stay (depth + time cap decide the move); wrap has budget=1.
+        # (2) Coding phase: advance to wrap after the coding budget (time *or* turns).
+        if cur == "coding":
+            time_up = (
+                self.coding_elapsed_start is not None
+                and (time.monotonic() - self.coding_elapsed_start) / 60.0 >= self.coding_min
+            )
+            turns_up = self._phase_answer_count() >= self.coding_max_turns
+            if time_up or turns_up:
+                self._enter_phase(ordered, min(idx + 1, len(ordered) - 1))
+                if self.phase == "wrap":
+                    # We just entered wrap; it will be spoken on the NEXT next_line.
+                    pass
+            return
+
+        # (3) Probe: stay for a bounded number of answers (turn cap) or time cap.
+        if cur == "probe":
+            if self._phase_answer_count() >= self.probe_max_turns:
+                self._enter_phase(ordered, min(idx + 1, len(ordered) - 1))
+                if self.phase == "coding" and not self.coding_announced:
+                    self.coding_announced = True
+                    self.coding_elapsed_start = time.monotonic()
+            return
+
+        # (4) Short-lived phases advance after their first answer; wrapping marks done.
+        budget = {"intro": 1, "project": 1, "wrap": 1}
+        if cur in budget and self._phase_answer_count() >= budget[cur]:
+            if cur == "wrap":
+                # Spoke the farewell already -> the interview is over.
+                self.done = True
+                return
+            self._enter_phase(ordered, min(idx + 1, len(ordered) - 1))
+
+    def _phase_answer_count(self) -> int:
+        """Number of candidate answers recorded in the CURRENT phase (since entry)."""
+        return self._phase_user_count() - self._phase_entry_users
 
     def _enter_phase(self, ordered: list[str], new_index: int) -> None:
         if new_index == self.phase_index:
@@ -363,6 +393,10 @@ class LiveFlow:
         self.phase_index = new_index
         self.phase_started_at = time.monotonic()
         self._phase_entry_users = self._phase_user_count()
+        # Entering coding starts the coding timer (so time cap applies).
+        if self.phase == "coding" and not self.coding_announced:
+            self.coding_announced = True
+            self.coding_elapsed_start = time.monotonic()
 
     def _phase_user_count(self) -> int:
         return sum(1 for t in self.turns if t.get("role") == "user")

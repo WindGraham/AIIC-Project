@@ -269,4 +269,6 @@ def test_full_duplex_ws_flow(monkeypatch):
     assert types[2] == "spoken" and "解决" in frames[2]["text"]
     assert types[3] == "audio" and types[4] == "audio"
     assert base64.b64decode(frames[3]["base64"]) == b"ID3fake"
-    assert types[5] == "done"
+    # No prepared LiveFlow -> the interview is not over -> normal end is `end_turn`,
+    # NOT `done` (which would incorrectly end the whole interview after one exchange).
+    assert types[5] == "end_turn"

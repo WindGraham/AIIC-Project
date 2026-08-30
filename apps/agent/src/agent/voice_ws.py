@@ -20,7 +20,8 @@ server -> client (JSON text):
     {"type":"final","text":"..."}      turn-final transcript
     {"type":"spoken","text":"..."}     the full AI interviewer line
     {"type":"audio","base64":"..."}    one MP3 chunk (play immediately)
-    {"type":"done"}                    turn finished (no more audio coming)
+    {"type":"end_turn"}                this spoken turn finished (keep listening)
+    {"type":"done"}                    the WHOLE interview is over (stop + report)
     {"type":"error","error":"..."}     non-fatal provider error
 
 Flow: on `start` (or the first audio frame) begin STT accumulation; when STT
@@ -236,6 +237,9 @@ class VoiceSession:
         self.turn_task: Optional[asyncio.Task] = None
         self.playback_active = False
         self._announced = False  # the opening question is spoken at most once
+        self._processing = False  # a turn is past STT and running the LLM/response
+        self._pending_frames: list[bytes] = []  # mic frames arriving mid-LLM (barge-in)
+        self._barging = False  # switched to a candidate turn while playing
 
     # ---- receive side ----------------------------------------------------
     async def run(self) -> None:
@@ -281,6 +285,8 @@ class VoiceSession:
         self._interrupt()
         q: asyncio.Queue = asyncio.Queue()
         self.queue = q
+        self._processing = False
+        self._barging = False
         self.turn_task = asyncio.create_task(self._turn_worker(q))
         # First turn of the interview: the AI should OPEN the call by speaking the
         # current question (so the candidate hears "请介绍你自己" etc.), not wait to
@@ -308,7 +314,8 @@ class VoiceSession:
         if not q or flow.done:
             return
         self._announced = True
-        await self._send({"type": "spoken", "text": q})
+        section, phase = self._current_section_phase()
+        await self._send({"type": "spoken", "text": q, "section": section, "phase": phase})
         self.playback_active = True
         try:
             async for chunk in synthesize_stream_async(q):
@@ -332,14 +339,26 @@ class VoiceSession:
         self.turn_task = None
         self.queue = None
         self.playback_active = False
+        self._processing = False
 
     def _on_audio(self, frame: bytes) -> None:
-        """Barge-in aware audio ingest: audio during playback cuts the AI line
-        and opens a fresh turn; the very first audio acts as an implicit start."""
+        """Barge-in aware audio ingest.
+
+        - While the AI is PLAYING (no LLM in flight): any audio is a barge-in —
+          cancel playback and start a fresh candidate turn.
+        - While a turn is PROCESSING (LLM/response in flight): buffer the mic frames
+          so we don't start a second turn (which would double-advance the flow);
+          drain them when the current turn completes.
+        - Otherwise: feed frames into the active turn's STT queue.
+        """
         if not frame:
             return
+        if self._processing:
+            self._pending_frames.append(frame)
+            return
         if self.playback_active:
-            self._begin_turn()  # cancels playback, opens a fresh turn
+            self._barging = True
+            self._begin_turn()  # cancels playback, opens a fresh candidate turn
         elif self.queue is None:
             self._begin_turn()
         if self.queue is not None and self.turn_task is not None and not self.turn_task.done():
@@ -365,6 +384,18 @@ class VoiceSession:
             if self.turn_task is asyncio.current_task():
                 self.turn_task = None
                 self.queue = None
+                self._processing = False
+                self._drain_pending()
+
+    def _drain_pending(self) -> None:
+        """If the candidate spoke while the AI was processing, start their turn now."""
+        if self._pending_frames:
+            frames = self._pending_frames
+            self._pending_frames = []
+            self._begin_turn()
+            if self.queue is not None and self.turn_task is not None:
+                for f in frames:
+                    self.queue.put_nowait(f)
 
     async def _run_turn(self, queue: asyncio.Queue) -> None:
         final_text = ""
@@ -380,17 +411,22 @@ class VoiceSession:
         except Exception as exc:  # noqa: BLE001
             logger.warning("stt loop failed: %s", exc)
             await self._send({"type": "error", "error": f"stt: {exc}"})
-            await self._send({"type": "done"})
+            await self._end_or_continue()
             return
         await self._send({"type": "final", "text": final_text})
         if not final_text.strip():
-            await self._send({"type": "done"})
+            # Nothing recognized: don't advance, just let the caller keep listening.
+            await self._end_or_continue()
             return
+        # LLM + response phase — buffer any concurrent mic frames for the next turn.
+        self._processing = True
         line = await self._next_interviewer_line(final_text)
+        self._processing = False
         if not line:
-            await self._send({"type": "done"})
+            await self._end_or_continue()
             return
-        await self._send({"type": "spoken", "text": line})
+        section, phase = self._current_section_phase()
+        await self._send({"type": "spoken", "text": line, "section": section, "phase": phase})
         self.playback_active = True
         try:
             async for chunk in synthesize_stream_async(line):
@@ -402,7 +438,35 @@ class VoiceSession:
             await self._send({"type": "error", "error": f"tts: {exc}"})
         finally:
             self.playback_active = False
-        await self._send({"type": "done"})
+        await self._end_or_continue()
+
+    async def _end_or_continue(self) -> None:
+        """Send the correct end-of-turn signal.
+
+        `done` means the WHOLE interview is over (client stops + shows report); a
+        normal turn end is `end_turn` (client keeps listening for the next result).
+        """
+        if self._is_over():
+            await self._send({"type": "done"})
+        else:
+            await self._send({"type": "end_turn"})
+
+    def _is_over(self) -> bool:
+        try:
+            flow = _flow_for(self.interview_id)
+        except Exception:  # noqa: BLE001
+            flow = None
+        return bool(flow and flow.done)
+
+    def _current_section_phase(self) -> tuple[str, str]:
+        """(section, phase) of the live flow, for the UI to reveal the coding round."""
+        try:
+            flow = _flow_for(self.interview_id)
+        except Exception:  # noqa: BLE001
+            flow = None
+        if flow is None:
+            return "technical", ""
+        return flow.section_for_ui(), flow.phase
 
     async def _next_interviewer_line(self, user_text: str) -> str:
         """Per-round interviewer line from the LiveFlow agent: persona + resume +
@@ -414,7 +478,7 @@ class VoiceSession:
             flow = None
         if flow is None:
             # Fallback (interview not prepared/known): keep the old conversational line.
-            return self._legacy_next_line(user_text)
+            return await self._legacy_next_line(user_text)
         if flow.done:
             return "面试已结束，感谢你的回答，可以查看你的报告了。"
         # flow.next_line records the answer + a PlannedQuestion for scoring internally.

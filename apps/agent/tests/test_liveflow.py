@@ -71,7 +71,7 @@ def test_phase_ladder_reaches_coding_then_wrap(monkeypatch):
     """The director should move intro -> project -> probe -> coding -> wrap, and
     the per-round agent output is whatever the (mocked) LLM says."""
     ctx = _make_ctx(has_coding=True)
-    flow = LiveFlow(ctx)
+    flow = LiveFlow(ctx, probe_max_turns=2, coding_max_turns=1)
     calls = {"n": 0}
 
     def fake_ask(_self):
@@ -95,16 +95,22 @@ def test_phase_ladder_reaches_coding_then_wrap(monkeypatch):
     line2 = flow.next_line("我做过项目A，负责后端。")
     assert flow.phase == "probe"
 
-    # stay in probe for a few turns
+    # probe_max_turns=2 so after 2 probe answers -> coding
     flow.next_line("项目难点是性能优化。")
-    flow.next_line("我用了缓存。")
     assert flow.phase == "probe"
+    flow.next_line("我用了缓存。")
+    assert flow.phase == "coding"
+    assert flow.coding_announced
 
-    # Force time cap to jump to coding: set group elapsed large.
-    flow._group_elapsed_min = lambda: float(flow.group_min + 1)  # type: ignore[method-assign]
-    flow.next_line("继续。")
-    assert flow.phase in ("coding", "wrap")
-    assert flow.coding_announced or flow.phase == "wrap"
+    # coding_max_turns=1 so one coding answer -> wrap (not done until wrap spoken)
+    flow.next_line("代码思路是这样。")
+    assert flow.phase == "wrap"
+    assert not flow.done, "done must not fire until the wrap line is spoken"
+
+    # wrap gets spoken; after it, done fires
+    wrap_line = flow.next_line("谢谢面试官。")
+    assert flow.done
+    assert wrap_line == "感谢，再见。"
 
 
 def test_no_coding_skips_to_wrap(monkeypatch):
