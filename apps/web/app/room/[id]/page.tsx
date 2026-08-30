@@ -10,6 +10,7 @@ import CodingPanel from "@/app/components/CodingPanel";
 import InterviewRoom, { ControlDock } from "@/app/components/InterviewRoom";
 import AgentPresence from "@/app/components/AgentPresence";
 import { startScreenFeed, stopScreenFeed } from "@/lib/screenFeed";
+import { unlockAudio } from "@/lib/audio-unlock";
 import { createSessionRecorder } from "@/lib/sessionRecorder";
 
 type Mode = "text" | "ptt" | "duplex";
@@ -199,6 +200,18 @@ export default function Room() {
       }
     })();
   }, [id]);
+
+  // First user gesture unlocks audio so the agent's TTS voice actually plays
+  // (browsers block autoplay until a click/pointer interaction).
+  useEffect(() => {
+    const onGesture = () => unlockAudio();
+    window.addEventListener("pointerdown", onGesture, { once: true });
+    window.addEventListener("click", onGesture, { once: true });
+    return () => {
+      window.removeEventListener("pointerdown", onGesture);
+      window.removeEventListener("click", onGesture);
+    };
+  }, []);
 
   // stop voice when done
   useEffect(() => {

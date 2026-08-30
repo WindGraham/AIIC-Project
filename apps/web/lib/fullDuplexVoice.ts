@@ -42,7 +42,7 @@
 
 export type FullDuplexStatus = "idle" | "starting" | "live" | "error" | "stopped";
 
-import { base64ToBlob } from "@/lib/voice";
+import { playMp3Base64 } from "@/lib/audio-unlock";
 
 export interface FullDuplexCallbacks {
   /** Live partial transcription while the user is talking. */
@@ -107,36 +107,23 @@ function resampleLinear(input: Float32Array, from: number, to: number): Float32A
 // user talks, so this queue simply drains what was already received.
 // ---------------------------------------------------------------------------
 function createPlaybackQueue() {
-  const queue: { el: HTMLAudioElement; url: string }[] = [];
+  const queue: string[] = []; // MP3 base64 chunks, played sequentially via shared AudioContext
   let playing = false;
   let stopped = false;
 
   function pump() {
     if (playing || stopped || queue.length === 0) return;
-    const { el, url } = queue.shift()!;
     playing = true;
-    const finish = () => {
-      playing = false;
-      try {
-        el.src = "";
-      } catch {
-        /* ignore */
-      }
-      URL.revokeObjectURL(url);
-      pump();
-    };
-    el.onended = finish;
-    el.onerror = finish;
-    el.play().catch(finish);
+    const b64 = queue.shift()!;
+    // Play through the shared (user-gesture-unlocked) AudioContext so the agent's
+    // voice is actually audible under browser autoplay policy.
+    playMp3Base64(b64).then(() => { playing = false; pump(); });
   }
 
   return {
     enqueue(b64: string) {
       if (stopped) return;
-      const url = URL.createObjectURL(base64ToBlob(b64, "audio/mpeg"));
-      const el = new Audio(url);
-      el.preload = "auto";
-      queue.push({ el, url });
+      queue.push(b64);
       pump();
     },
     clear() {
@@ -144,7 +131,6 @@ function createPlaybackQueue() {
     },
     stop() {
       stopped = true;
-      queue.forEach(({ url }) => URL.revokeObjectURL(url));
       queue.length = 0;
       playing = false;
     },

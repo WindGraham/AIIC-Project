@@ -2,6 +2,7 @@
 
 import { useRef, useState } from "react";
 import { createRecorder } from "@/lib/voice";
+import { playMp3Base64 } from "@/lib/audio-unlock";
 
 /**
  * 功能测试 A：语音气泡 → 转文字(STT) → 再把文字转成 TTS 语音回放。
@@ -63,8 +64,7 @@ export default function VoiceTextTts() {
 
   function playTts() {
     if (!ttsB64) return;
-    const a = new Audio(`data:audio/mp3;base64,${ttsB64}`);
-    a.play().catch(() => {});
+    playMp3Base64(ttsB64).catch(() => {});
   }
 
   return (
