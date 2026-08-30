@@ -37,6 +37,7 @@ from urllib.parse import urlparse
 from livekit import api
 from livekit.protocol import egress as E
 from livekit.protocol import room as R
+from livekit.protocol import models as M  # TrackInfo / ParticipantInfo / TrackSource
 
 from .config import get_settings
 
@@ -103,10 +104,10 @@ def _api() -> api.LiveKitAPI:
     return api.LiveKitAPI(rest_url(), s.livekit_api_key, s.livekit_api_secret)
 
 
-def _track_summary(t: R.TrackInfo) -> dict:
+def _track_summary(t: M.TrackInfo) -> dict:
     return {
         "sid": t.sid,
-        "source": t.source,  # 3 == SCREEN_SHARE
+        "source": t.source,  # models.TrackSource (3 == SCREEN_SHARE)
         "type": t.type,
         "name": t.name,
         "muted": t.muted,
@@ -115,7 +116,7 @@ def _track_summary(t: R.TrackInfo) -> dict:
     }
 
 
-def _participant_summary(p: R.ParticipantInfo) -> dict:
+def _participant_summary(p: M.ParticipantInfo) -> dict:
     return {
         "identity": p.identity,
         "name": p.name,
@@ -157,7 +158,7 @@ async def room_status(interview_id: str) -> dict:
         {"identity": p["identity"], **t}
         for p in participants
         for t in p["tracks"]
-        if t["source"] == R.TrackSource.SCREEN_SHARE
+        if t["source"] == M.TrackSource.SCREEN_SHARE
     ]
     return {
         "ok": True,
