@@ -7,12 +7,13 @@ import json
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from .config import get_settings
+from .store import get_store
 from .contracts import InterviewContext
 from .coding import judge_code, load_problem
 from .llm import LLM
@@ -43,6 +44,7 @@ class Booking(BaseModel):
     notes: str = ""
     has_coding: bool = True
     scenario: str = "algorithm"  # algorithm | retest(保研复试占位)
+    persona: str = "high-peer"   # peer | high-peer | manager
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -60,31 +62,19 @@ class Interview(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# In-memory store (light path; swap for Supabase without changing callers),
-# with lightweight JSON file persistence so bookings survive agent restarts.
+# In-memory contexts keyed by interview id (transient per live run).
+# Persistent user/session/resume/booking data lives in SQLite on the data disk
+# (apps/agent/src/agent/store.py -> settings.data_dir = /data/probedesk).
 # ---------------------------------------------------------------------------
-_STORE: dict[str, dict] = {"bookings": {}, "interviews": {}}
-_STORE_PATH = Path(__file__).resolve().parent / "data" / "store.json"
-
-
-def _load_store() -> None:
-    try:
-        if _STORE_PATH.exists():
-            data = json.loads(_STORE_PATH.read_text())
-            _STORE.update(data)
-    except Exception:
-        pass
-
-
-def _save_store() -> None:
-    try:
-        _STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _STORE_PATH.write_text(json.dumps(_STORE, ensure_ascii=False, default=str))
-    except Exception:
-        pass
-
-
-_load_store()
+def _auth_user(authorization: str = Header(default="")) -> dict[str, Any]:
+    """Bearer-token auth -> current user, or 401."""
+    token = ""
+    if authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+    user = get_store().user_for_session(token) if token else None
+    if user is None:
+        raise HTTPException(401, "not authenticated")
+    return user
 
 
 @app.get("/health")
@@ -103,17 +93,18 @@ def health():
 
 
 @app.post("/api/interviews/book", response_model=Booking, status_code=201)
-def book_interview(payload: Booking):
+def book_interview(payload: Booking, user: dict = Depends(_auth_user)):
     payload.id = payload.id or str(uuid.uuid4())
-    _STORE["bookings"][payload.id] = payload.model_dump()
-    _save_store()
+    if not payload.name:
+        payload.name = f"{payload.position or '模拟'}面试"
+    get_store().save_booking(user["id"], payload.model_dump())
     return payload
 
 
 @app.get("/api/interviews")
-def list_interviews():
+def list_interviews(user: dict = Depends(_auth_user)):
     out = []
-    for b in _STORE["bookings"].values():
+    for b in get_store().list_bookings(user["id"]):
         scheduled = b.get("scheduled_at")
         try:
             delta = (datetime.fromisoformat(str(scheduled)) - datetime.utcnow()).total_seconds()
@@ -129,13 +120,13 @@ def list_interviews():
 
 
 @app.post("/api/interviews/{booking_id}/start", status_code=201)
-def start_interview(booking_id: str):
-    b = _STORE["bookings"].get(booking_id)
+def start_interview(booking_id: str, user: dict = Depends(_auth_user)):
+    b = get_store().get_booking(user["id"], booking_id)
     if b is None:
         raise HTTPException(404, "booking not found")
     # reuse the booking fields to build the interview context (real LLM prep)
     ctx = build_plan(b.get("resume_text", ""), b.get("jd_text", ""), b.get("company", ""),
-                     b.get("position", ""), "mid", "zh")
+                     b.get("position", ""), "mid", "zh", persona=b.get("persona", "high-peer"))
     iid = str(uuid.uuid4())
     _CONTEXTS[iid] = ctx
     from .pipeline import ask_current as _ask
@@ -147,6 +138,88 @@ def start_interview(booking_id: str):
                  "questions": [{"id": q.id, "section": q.section, "text": q.text,
                                 "difficulty": q.difficulty, "problem_id": q.problem_id} for q in ctx.plan.questions]},
     }
+
+
+# ---------------------------------------------------------------------------
+# Auth + resume management (login capability). Accounts/sessions/resumes live
+# in SQLite on the data disk.
+# ---------------------------------------------------------------------------
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/api/auth/register", status_code=201)
+def register(req: RegisterRequest):
+    try:
+        user = get_store().create_user(req.username, req.password)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    token = get_store().create_session(user["id"])
+    return {"user": user, "token": token}
+
+
+@app.post("/api/auth/login")
+def login(req: LoginRequest):
+    user = get_store().verify_user(req.username, req.password)
+    if user is None:
+        raise HTTPException(401, "invalid username or password")
+    token = get_store().create_session(user["id"])
+    return {"user": user, "token": token}
+
+
+@app.post("/api/auth/logout")
+def logout(authorization: str = Header(default="")):
+    token = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+    if token:
+        get_store().delete_session(token)
+    return {"ok": True}
+
+
+@app.get("/api/auth/me")
+def me(user: dict = Depends(_auth_user)):
+    return {"user": user}
+
+
+# --- resumes ----------------------------------------------------------------
+class ResumeIn(BaseModel):
+    name: str = "我的简历"
+    resume_text: str
+    skills: list[str] = []
+    is_default: bool = False
+
+
+@app.get("/api/resumes")
+def list_resumes(user: dict = Depends(_auth_user)):
+    return get_store().list_resumes(user["id"])
+
+
+@app.post("/api/resumes", status_code=201)
+def create_resume(req: ResumeIn, user: dict = Depends(_auth_user)):
+    if not req.resume_text.strip():
+        raise HTTPException(400, "resume_text is required")
+    return get_store().create_resume(user["id"], req.name, req.resume_text, req.skills, req.is_default)
+
+
+@app.put("/api/resumes/{resume_id}")
+def update_resume(resume_id: str, req: ResumeIn, user: dict = Depends(_auth_user)):
+    got = get_store().update_resume(user["id"], resume_id, name=req.name, resume_text=req.resume_text,
+                                    skills=req.skills, is_default=req.is_default)
+    if got is None:
+        raise HTTPException(404, "resume not found")
+    return got
+
+
+@app.delete("/api/resumes/{resume_id}")
+def delete_resume(resume_id: str, user: dict = Depends(_auth_user)):
+    if not get_store().delete_resume(user["id"], resume_id):
+        raise HTTPException(404, "resume not found")
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------

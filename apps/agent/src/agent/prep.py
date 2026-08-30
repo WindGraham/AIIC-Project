@@ -178,16 +178,32 @@ def _company_from_profile(prof: Any) -> CompanyIntel | None:
     )
 
 
-def _build_plan(llm: LLM, job: JobSpec, gap: GapAnalysis, company: CompanyIntel, lang: str, position: str) -> QuestionPlan:
+def _persona_style(persona: str) -> str:
+    """C1: interviewer persona (selected at booking) -> tone / rigor / question style."""
+    p = (persona or "high-peer").lower()
+    table = {
+        "peer": ("同级面试官，语气平等友好，重在技术切磋与引导，问题偏协作式，"
+                 "鼓励表达，压力小，出题偏常规深度，追问较温和。"),
+        "high-peer": ("资深同级面试官，语气专业但平等，重视方法、复杂度与工程取舍，"
+                      "问题有梯度，追问关注细节与权衡，压力中等。"),
+        "manager": ("主管面试官，语气偏正式、有压迫感，重在全局判断、owner-ship 与结果导向，"
+                    "常追问决策理由与冲突处理，出题更看重架构与落地，压力较大。"),
+    }
+    return table.get(p, table["high-peer"])
+
+
+def _build_plan(llm: LLM, job: JobSpec, gap: GapAnalysis, company: CompanyIntel, lang: str, position: str, persona: str = "high-peer") -> QuestionPlan:
+    style = _persona_style(persona)
     sys_ = ("You are a senior interviewer writing a mock-interview plan. Given the job/gap/company, produce 8-12 "
             "questions across sections in this order: intro, behavioral, technical, coding, wrap. Difficulty rises "
             "1->5. Each question: {id,section,text,question,difficulty(1-5),rubric[{point,weight,weights sum to 1}],"
             "followups[],target_competency}. Coding section: include exactly one question with target_competency "
-            "'hand-code'. Return ONLY JSON matching {sections_order[],questions[]}.")
+            "'hand-code'. Return ONLY JSON matching {sections_order[],questions[]}.\n"
+            f"INTERVIEWER PERSONA: {style}")
     user = (f"Position: {job.position} ({job.seniority}) @ {job.company}\n"
             f"Must-have: {job.must_have}\nNice-to-have: {job.nice_to_have}\n"
             f"Tech stack: {job.tech_stack}\nStrengths: {gap.strengths} Gaps: {gap.gaps} "
-            f"Probe targets: {gap.probe_targets}\nLanguage: {lang}")
+            f"Probe targets: {gap.probe_targets}\nLanguage: {lang}\nPersona: {persona}")
     j = _json_or(llm, sys_, user, {}, max_tokens=4000)
     qs: list[PlannedQuestion] = []
     for i, raw in enumerate(j.get("questions", []) if isinstance(j.get("questions"), list) else []):
@@ -229,7 +245,8 @@ def _fallback_plan(position: str) -> QuestionPlan:
     return QuestionPlan(sections_order=["technical"], questions=[q])
 
 
-def build_plan(resume_text: str, jd_text: str, company: str, position: str, seniority: str, lang: str = "zh") -> InterviewContext:
+def build_plan(resume_text: str, jd_text: str, company: str, position: str, seniority: str,
+               lang: str = "zh", persona: str = "high-peer") -> InterviewContext:
     llm = LLM()
     position = position or "软件工程师"
     seniority = _enum(seniority, {"junior", "mid", "senior", "staff"}, "mid")
@@ -256,7 +273,7 @@ def build_plan(resume_text: str, jd_text: str, company: str, position: str, seni
         gap = GapAnalysis(strengths=candidate.skills, gaps=[], probe_targets=candidate.projects[:2] or [], missing_skills=[])
 
     try:
-        plan = _build_plan(llm, job, gap, company_intel, lang, position)
+        plan = _build_plan(llm, job, gap, company_intel, lang, position, persona)
     except Exception:
         plan = _fallback_plan(position)
 

@@ -48,7 +48,9 @@ apps/agent/harness/run_out/
 # researcher runtime cache (live API search results; not source)
 apps/agent/src/agent/researcher/researcher_cache.json
 
-# runtime booking/context store (personal resume data — never commit)
+# runtime data lives on the data disk (settings.data_dir = /data/probedesk),
+# never on / — nothing to ignore here for that path; keep old source-tree
+# store ignored so a stray legacy file is never committed.
 apps/agent/src/agent/data/store.json
 
 # deployment private key (never commit; only the .pub is committed)

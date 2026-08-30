@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     xhs_cookie: str = ""
     zhihu_d_cookie: str = ""
 
+    # --- Runtime data directory (must NOT be on / — relocate to a data disk).
+    # SQLite store (users/sessions/resumes/bookings), recordings & caches live here.
+    data_dir: str = "/data/probedesk"
+
 
 @lru_cache
 def get_settings() -> Settings:

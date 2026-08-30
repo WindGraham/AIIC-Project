@@ -89,7 +89,9 @@ def _cache_path() -> Path:
     override = os.environ.get("RESEARCHER_CACHE_PATH")
     if override:
         return Path(override)
-    return Path(__file__).resolve().parent / "researcher_cache.json"
+    # runtime cache lives on the data disk (never on /)
+    from ..config import get_settings
+    return Path(get_settings().data_dir) / "researcher_cache.json"
 
 
 def _cache_key(company: str, position: str, seniority: str) -> str:
