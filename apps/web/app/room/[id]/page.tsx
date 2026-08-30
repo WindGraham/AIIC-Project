@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { createRecorder, playAudioBase64 } from "@/lib/voice";
+import CodingPanel from "@/app/components/CodingPanel";
 
 type Turn = { role: "ai" | "cand"; text: string };
 
@@ -17,6 +18,7 @@ export default function Room() {
   const [answer, setAnswer] = useState("");
   const [busy, setBusy] = useState(false);
   const [recording, setRecording] = useState(false);
+  const [section, setSection] = useState<string | null>(null);
   const recRef = useRef<{ start(): Promise<void>; stop(): Promise<string> } | null>(null);
 
   const addTurn = (role: "ai" | "cand", text: string) => setConvo((c) => [...c, { role, text }]);
@@ -27,6 +29,7 @@ export default function Room() {
       try {
         const d = await (await fetch(`/api/interviews/${id}/next`)).json();
         setQ(d.question);
+        setSection(d.section);
         if (d.question) addTurn("ai", d.question);
         if (d.done) setDone(true);
         // speak the current question
@@ -55,6 +58,7 @@ export default function Room() {
       })).json();
       if (d.next_question) { addTurn("ai", d.next_question); setQ(d.next_question); }
       else setDone(true);
+      setSection(d.section);
     } finally { setBusy(false); }
   }
 
@@ -78,6 +82,7 @@ export default function Room() {
       if (d.text) addTurn("cand", d.text);
       if (d.next_question) { addTurn("ai", d.next_question); setQ(d.next_question); }
       else setDone(true);
+      setSection(d.section);
       if (d.audio_b64) await playAudioBase64(d.audio_b64);
     } finally { setBusy(false); recRef.current = null; }
   }
@@ -102,6 +107,12 @@ export default function Room() {
         ))}
         {done && <div className="text-center text-white/40 text-sm mt-4">面试结束，可查看报告。</div>}
       </div>
+
+      {section === "coding" && !done && (
+        <div className="mb-4">
+          <CodingPanel interviewId={id} />
+        </div>
+      )}
 
       <div className="flex gap-2 items-stretch">
         <textarea

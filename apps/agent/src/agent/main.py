@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from .config import get_settings
 from .contracts import InterviewContext
 from .coding import judge_code, load_problem
-from .pipeline import ask_current, finalize, record_answer
+from .pipeline import ask_current, current_question, finalize, record_answer
 from .prep import build_plan
 from .stt import transcribe_flash
 from .tts import synthesize
@@ -128,7 +128,8 @@ def next_question(interview_id: str):
     if ctx is None:
         raise HTTPException(404, "interview not prepared")
     q = ask_current(ctx)
-    return {"question": q, "done": q is None}
+    cq = current_question(ctx)
+    return {"question": q, "done": q is None, "section": cq.section if cq else None}
 
 
 @app.post("/api/interviews/{interview_id}/answer")
@@ -137,7 +138,8 @@ def answer(interview_id: str, req: dict):
     if ctx is None:
         raise HTTPException(404, "interview not prepared")
     nxt = record_answer(ctx, str(req.get("answer", "")))
-    return {"next_question": nxt, "done": nxt is None}
+    cq = current_question(ctx)
+    return {"next_question": nxt, "done": nxt is None, "section": cq.section if cq else None}
 
 
 @app.get("/api/interviews/{interview_id}/report")
@@ -215,8 +217,9 @@ def voice_answer(req: VoiceAnswer):
         text, nxt = "", q  # start turn: speak the current question
     speak = nxt if nxt else "面试结束，感谢你的回答，可以查看你的报告了。"
     mp3 = synthesize(speak)
+    cq = current_question(ctx)
     return {"text": text, "spoken": speak, "next_question": nxt, "done": nxt is None,
-            "audio_b64": base64.b64encode(mp3).decode()}
+            "audio_b64": base64.b64encode(mp3).decode(), "section": cq.section if cq else None}
 
 
 # ---------------------------------------------------------------------------

@@ -54,3 +54,15 @@ export async function voiceAnswer(body: {
 }): Promise<any> {
   return call("/api/voice/answer", { method: "POST", body: JSON.stringify(body) });
 }
+
+export async function getCodingProblem(interviewId: string): Promise<any> {
+  return call(`/api/interviews/${interviewId}/problem`);
+}
+
+export async function codingJudge(body: {
+  interview_id: string;
+  code: string;
+  language?: string;
+}): Promise<any> {
+  return call("/api/coding/judge", { method: "POST", body: JSON.stringify(body) });
+}
