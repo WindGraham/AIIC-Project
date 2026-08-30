@@ -3,10 +3,12 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { createRecorder, playAudioBase64 } from "@/lib/voice";
+import { createRecorder } from "@/lib/voice";
+import { speakInterviewer } from "@/lib/agentPresence";
 import CodingPanel from "@/app/components/CodingPanel";
 import ScreenRead from "@/app/components/ScreenRead";
 import InterviewRoom from "@/app/components/InterviewRoom";
+import AgentPresence from "@/app/components/AgentPresence";
 
 type Turn = { role: "ai" | "cand"; text: string };
 
@@ -51,7 +53,7 @@ export default function Room() {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ interview_id: id, audio_b64: "" }),
           })).json();
-          if (v.audio_b64) await playAudioBase64(v.audio_b64);
+          if (v.audio_b64) await speakInterviewer(v.audio_b64);
         } catch {}
       } catch {
         setQ("无法加载面试。");
@@ -96,7 +98,7 @@ export default function Room() {
       if (d.next_question) { addTurn("ai", d.next_question); setQ(d.next_question); }
       else setDone(true);
       setSection(d.section);
-      if (d.audio_b64) await playAudioBase64(d.audio_b64);
+      if (d.audio_b64) await speakInterviewer(d.audio_b64);
     } finally { setBusy(false); recRef.current = null; }
   }
 
@@ -162,6 +164,14 @@ export default function Room() {
           <CodingPanel interviewId={id} />
         </div>
       )}
+
+      <div className="mb-3">
+        <AgentPresence
+          interviewId={id}
+          active={!done && q !== "加载中…" && q !== "AI 面试官正在准备面试…"}
+          onRead={(text) => addTurn("ai", "【看屏幕】" + text.slice(0, 220))}
+        />
+      </div>
 
       {!done && (
         <div className="mb-4">

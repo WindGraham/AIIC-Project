@@ -42,7 +42,8 @@ class Settings(BaseSettings):
     minimax_tts_voice: str = "male-qn-qingse"
 
     # --- LiveKit (self-hosted; reuse /data/livekit) ---
-    livekit_url: str = "ws://127.0.0.1:7880"
+    livekit_url: str = "ws://127.0.0.1:7880"  # internal, server-side REST/WS
+    livekit_public_url: str = "wss://voice.windgraham.art"  # browser-reachable
     livekit_api_key: str = ""
     livekit_api_secret: str = ""
     agent_name: str = "interviewer"

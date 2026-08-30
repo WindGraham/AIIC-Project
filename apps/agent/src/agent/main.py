@@ -22,6 +22,12 @@ from .pipeline import ask_current, current_question, finalize, record_answer
 from .prep import build_plan
 from .stt import transcribe_flash
 from .tts import synthesize
+from .livekit_bridge import (
+    agent_join as livekit_agent_join,
+    agent_leave as livekit_agent_leave,
+    livekit_configured,
+    room_status as livekit_room_status,
+)
 
 app = FastAPI(title="aiic-agent", version="0.1.0")
 logger = logging.getLogger("agent.main")
@@ -545,6 +551,76 @@ def vision_analyze(req: VisionCall):
         return {"description": LLM().vision(req.prompt, req.image_b64, req.mime)}
     except Exception as e:
         return {"description": "", "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# LiveKit agent presence + recording + "agent sees screen" (server half).
+# The real agent participant is a browser shim (web AgentPresence) that joins
+# with the JWT minted by agent-join; REST here ensures the room, tracks
+# participants/screen-share tracks and controls egress recording.
+# ---------------------------------------------------------------------------
+def _require_livekit() -> None:
+    if not livekit_configured():
+        raise HTTPException(503, "LiveKit not configured (LIVEKIT_API_KEY/SECRET missing)")
+
+
+@app.post("/api/interviews/{interview_id}/agent-join")
+async def agent_join(interview_id: str, user: Optional[dict] = Depends(_optional_user)):
+    """Call once the interview room is live: ensure room + mint agent token +
+    best-effort start recording. Returns connection details for the browser shim."""
+    _check_owner(interview_id, user)
+    _require_livekit()
+    try:
+        return await livekit_agent_join(interview_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("agent-join failed for %s", interview_id)
+        raise HTTPException(502, f"LiveKit agent join failed: {exc}")
+
+
+@app.post("/api/interviews/{interview_id}/agent-leave")
+async def agent_leave(interview_id: str, user: Optional[dict] = Depends(_optional_user)):
+    """Stop recording and remove the agent participant (interview ended)."""
+    _check_owner(interview_id, user)
+    _require_livekit()
+    try:
+        return await livekit_agent_leave(interview_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"LiveKit agent leave failed: {exc}")
+
+
+@app.get("/api/interviews/{interview_id}/agent/status")
+async def agent_status(interview_id: str, user: Optional[dict] = Depends(_optional_user)):
+    """Room participants + published tracks + whether the agent is present."""
+    _check_owner(interview_id, user)
+    _require_livekit()
+    try:
+        return await livekit_room_status(interview_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"LiveKit status failed: {exc}")
+
+
+@app.get("/api/interviews/{interview_id}/agent/screenshare")
+async def agent_screenshare(interview_id: str, user: Optional[dict] = Depends(_optional_user)):
+    """Server-side view of published screen-share tracks in the interview room.
+
+    The LiveKit REST API can list the screen-share track (source, dimensions,
+    publisher) but has NO pixel access — frames are only available to a
+    subscribed participant. The browser shim (AgentPresence) subscribes to this
+    track, downsamples frames and POSTs them to /api/vision/analyze (Gemini).
+    """
+    _check_owner(interview_id, user)
+    _require_livekit()
+    try:
+        st = await livekit_room_status(interview_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"LiveKit status failed: {exc}")
+    return {
+        "ok": st.get("ok"),
+        "room": st.get("room"),
+        "screenshare": st.get("screenshare", []),
+        "note": "Track metadata only (REST has no frames); subscribe client-side "
+                "and send frames to /api/vision/analyze for Gemini reading.",
+    }
 
 
 # ---------------------------------------------------------------------------

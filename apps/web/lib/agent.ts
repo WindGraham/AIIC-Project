@@ -210,3 +210,22 @@ export async function getRecap(interviewId: string): Promise<any> {
 export async function searchSources(body: { query: string; company?: string; position?: string; limit?: number }): Promise<any> {
   return call("/api/search", { method: "POST", body: JSON.stringify(body) });
 }
+
+// ---------------------------------------------------------------------------
+// LiveKit agent presence (interviewer joins the room as a participant)
+// ---------------------------------------------------------------------------
+export async function agentJoin(interviewId: string) {
+  return call(`/api/interviews/${interviewId}/agent-join`, { method: "POST" });
+}
+
+export async function agentLeave(interviewId: string) {
+  return call(`/api/interviews/${interviewId}/agent-leave`, { method: "POST" });
+}
+
+export async function agentStatus(interviewId: string) {
+  return call(`/api/interviews/${interviewId}/agent/status`);
+}
+
+export async function agentScreenshare(interviewId: string) {
+  return call(`/api/interviews/${interviewId}/agent/screenshare`);
+}
