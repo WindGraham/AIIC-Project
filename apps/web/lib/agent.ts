@@ -183,6 +183,14 @@ export async function voiceAnswer(body: {
   return call("/api/voice/answer", { method: "POST", body: JSON.stringify(body) });
 }
 
+export async function voiceStt(body: { audio_b64: string; format?: string; mime?: string }): Promise<any> {
+  return call("/api/voice/stt", { method: "POST", body: JSON.stringify(body) });
+}
+
+export async function voiceTts(body: { text: string; voice?: string }): Promise<any> {
+  return call("/api/voice/tts", { method: "POST", body: JSON.stringify(body) });
+}
+
 export async function getCodingProblem(interviewId: string): Promise<any> {
   return call(`/api/interviews/${interviewId}/problem`);
 }
