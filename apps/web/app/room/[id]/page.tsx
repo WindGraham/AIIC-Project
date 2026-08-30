@@ -5,13 +5,13 @@ import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
 import { createFullDuplex } from "@/lib/fullDuplexVoice";
 import { createPtt } from "@/lib/pttVoice";
+import { base64ToBlob } from "@/lib/voice";
 import CodingPanel from "@/app/components/CodingPanel";
-import ScreenRead from "@/app/components/ScreenRead";
-import InterviewRoom from "@/app/components/InterviewRoom";
+import InterviewRoom, { ControlDock } from "@/app/components/InterviewRoom";
 import AgentPresence from "@/app/components/AgentPresence";
 
 type Mode = "text" | "ptt" | "duplex";
-type Turn = { role: "ai" | "cand"; text: string };
+type Turn = { role: "ai" | "cand"; text: string; audio?: string };
 type MicState = "off" | "connecting" | "live" | "error";
 
 const MODE_LABEL: Record<Mode, string> = {
@@ -35,8 +35,10 @@ function useVoiceEngine(
   handlers: {
     onFinal: (t: string) => void;
     onSpoken: (t: string, section?: string, phase?: string) => void;
+    onCandidate: (text: string, audioWavB64: string) => void;
     onDone: () => void;
     onStatus: (s: MicState) => void;
+    onProcessing: (active: boolean) => void;
   },
 ) {
   const duplexRef = useRef<VoiceEngineHandle | null>(null);
@@ -68,11 +70,13 @@ function useVoiceEngine(
     if (mode !== "ptt") return;
     const engine = createPtt(interviewId, {
       onRecording: () => {},
+      onCandidate: (t, b64) => handlers.onCandidate(t, b64),
       onSpoken: (t) => handlers.onSpoken(t),
       onDone: () => handlers.onDone(),
       onError: (m) => console.warn("ptt:", m),
       onStatus: (s) => {
         setPttStatus(s);
+        handlers.onProcessing(s === "processing");
         handlers.onStatus(s === "recording" ? "connecting" : s === "error" ? "error" : "off");
       },
     });
@@ -110,15 +114,31 @@ export default function Room() {
   const [partial, setPartial] = useState("");
   const lastAiRef = useRef<string>("");
   const [pttTouch, setPttTouch] = useState(false);
+  const [pttProcessing, setPttProcessing] = useState(false); // converting speech -> text
 
-  const addTurn = (role: "ai" | "cand", text: string) => {
+  const addTurn = (role: "ai" | "cand", text: string, audio?: string) => {
     if (role === "ai") lastAiRef.current = text;
-    setConvo((c) => [...c, { role, text }]);
+    setConvo((c) => [...c, { role, text, audio }]);
+  };
+
+  const playAudio = (b64: string) => {
+    try {
+      const url = URL.createObjectURL(base64ToBlob(b64, "audio/wav"));
+      const a = new Audio(url);
+      a.onended = () => URL.revokeObjectURL(url);
+      a.play().catch(() => {});
+    } catch {
+      /* ignore */
+    }
   };
 
   // voice engine handlers (shared between duplex + ptt)
   const voiceHandlersRef = useRef({
     onFinal: (t: string) => { setPartial(""); const x = t.trim(); if (x) addTurn("cand", x); },
+    onCandidate: (t: string, b64: string) => {
+      // Show the candidate's own voice bubble (playable) + the recognized text below.
+      addTurn("cand", t || "（未能识别语音）", b64);
+    },
     onSpoken: (t: string, section?: string, phase?: string) => {
       const x = t.trim();
       if (!x || x === lastAiRef.current) return; // dedupe agent's opening line
@@ -128,13 +148,16 @@ export default function Room() {
     },
     onDone: () => setDone(true),
     onStatus: (s: MicState) => setMic(s),
+    onProcessing: (active: boolean) => setPttProcessing(active),
   });
 
   const voice = useVoiceEngine(mode, id, {
     onFinal: (t) => voiceHandlersRef.current.onFinal(t),
+    onCandidate: (t, b64) => voiceHandlersRef.current.onCandidate(t, b64),
     onSpoken: (t, section, phase) => voiceHandlersRef.current.onSpoken(t, section, phase),
     onDone: () => voiceHandlersRef.current.onDone(),
     onStatus: (s) => voiceHandlersRef.current.onStatus(s),
+    onProcessing: (active) => voiceHandlersRef.current.onProcessing(active),
   });
 
   // on mount: load the next question (text) — the voice engine announces it for
@@ -229,8 +252,8 @@ export default function Room() {
         : mic === "off" ? "🔇 语音未启动" : mic === "connecting" ? "⏳ 连接语音…" : mic === "live" ? "🎙️ 聆听中，直接说话" : "🔇 语音不可用";
 
   return (
-    <main className="max-w-2xl mx-auto p-8 flex flex-col min-h-screen">
-      <div className="flex items-center justify-between mb-6">
+    <main className="max-w-5xl mx-auto p-6 flex flex-col h-screen">
+      <div className="flex items-center justify-between mb-4">
         <div>
           <h1 className="text-xl font-bold">面试房间</h1>
           <div className="flex items-center gap-2 mt-0.5">
@@ -261,120 +284,138 @@ export default function Room() {
         </div>
       </div>
 
-      <div className="flex-1 flex flex-col gap-3 overflow-y-auto mb-4">
-        {convo.map((t, i) => (
-          <div key={i} className={`p-3 rounded-xl max-w-[80%] ${t.role === "ai" ? "bg-white/10 self-start" : "bg-indigo-600 self-end"}`}>
-            <span className="block text-[10px] uppercase text-white/40 mb-1">{t.role === "ai" ? "面试官" : "我"}</span>
-            {t.text}
+      <div className="flex gap-4 flex-1 min-h-0">
+        {/* 左屏：对话（文字 / 语音气泡 / 实时转写） */}
+        <div className="flex-1 flex flex-col min-h-0">
+          <div className="flex-1 flex flex-col gap-3 overflow-y-auto mb-3 pr-2">
+            {convo.map((t, i) => (
+              <div key={i} className={`p-3 rounded-xl max-w-[82%] ${t.role === "ai" ? "bg-white/10 self-start" : "bg-indigo-600 self-end"}`}>
+                <span className="block text-[10px] uppercase text-white/40 mb-1">{t.role === "ai" ? "面试官" : "我"}</span>
+                {t.audio ? (
+                  <button onClick={() => playAudio(t.audio!)} title="点击播放语音"
+                    className="flex items-center gap-2 text-sm">
+                    <span className="text-lg">🔊</span>
+                    <span className="text-white/80">{t.text}</span>
+                  </button>
+                ) : (
+                  <span className="text-sm">{t.text}</span>
+                )}
+              </div>
+            ))}
+            {/* 转换加载标识 */}
+            {!done && (busy || (mode === "ptt" && pttProcessing)) && (
+              <div className="self-start flex items-center gap-2 text-sm text-white/50">
+                <span className="inline-block w-3.5 h-3.5 border-2 border-white/40 border-t-transparent rounded-full animate-spin" />
+                {busy ? "AI 面试官正在思考…" : "正在把语音转换成文字…"}
+              </div>
+            )}
+            {done && <div className="text-center text-white/40 text-sm mt-4">面试结束，可查看报告。</div>}
           </div>
-        ))}
-        {done && <div className="text-center text-white/40 text-sm mt-4">面试结束，可查看报告。</div>}
-      </div>
 
-      {showTranscript && (
-        <div className="mb-4 rounded-xl border border-white/10 p-3 max-h-48 overflow-auto bg-black/20">
-          <div className="text-xs text-white/40 mb-2">📝 实时转写（面试官思考流程不展示）</div>
-          {convo.length === 0 && <div className="text-white/30 text-sm">还没有对话，开始回答后会实时显示转写。</div>}
-          {convo.map((t, i) => (
-            <div key={i} className="text-sm mb-1">
-              <span className={`${t.role === "ai" ? "text-indigo-300" : "text-white/70"} font-medium`}>
-                {t.role === "ai" ? "面试官" : "我"}:
-              </span>{" "}
-              <span className="text-white/80">{t.text}</span>
+          {showTranscript && (
+            <div className="mb-3 rounded-xl border border-white/10 p-3 max-h-40 overflow-auto bg-black/20">
+              <div className="text-xs text-white/40 mb-2">📝 实时转写（面试官思考流程不展示）</div>
+              {convo.length === 0 && <div className="text-white/30 text-sm">还没有对话，开始回答后会实时显示转写。</div>}
+              {convo.map((t, i) => (
+                <div key={i} className="text-sm mb-1">
+                  <span className={`${t.role === "ai" ? "text-indigo-300" : "text-white/70"} font-medium`}>
+                    {t.role === "ai" ? "面试官" : "我"}:
+                  </span>{" "}
+                  <span className="text-white/80">{t.text}</span>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
-      )}
+          )}
 
-      {section === "coding" && !done && (
-        <div className="mb-4">
-          <CodingPanel interviewId={id} />
-        </div>
-      )}
+          {section === "coding" && !done && (
+            <div className="mb-3">
+              <CodingPanel interviewId={id} />
+            </div>
+          )}
 
-      {mode !== "text" && (
-        <div className="mb-3">
-          <AgentPresence
-            interviewId={id}
-            active={!done && q !== "加载中…" && q !== "AI 面试官正在准备面试…"}
-            onRead={(text) => addTurn("ai", "【看屏幕】" + text.slice(0, 220))}
-          />
-        </div>
-      )}
+          {!done && partial && (
+            <div className="mb-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm">
+              <span className="text-white/40">你正在说：</span>
+              <span className="text-white/85">{partial}</span>
+            </div>
+          )}
 
-      {mode !== "text" && !done && (
-        <div className="mb-4">
-          <ScreenRead onRead={(text) => addTurn("ai", "【看屏幕】" + text.slice(0, 220))} />
-        </div>
-      )}
+          {/* 输入区：模式感知 */}
+          {!done && mode === "ptt" && (
+            <div className="mb-3 flex items-center gap-2">
+              <button
+                onPointerDown={pttDown}
+                onPointerUp={pttUp}
+                onPointerLeave={pttUp}
+                onContextMenu={(e) => e.preventDefault()}
+                className={`flex-1 select-none rounded-lg border px-5 py-3 font-semibold transition-colors ${
+                  pttTouch ? "bg-emerald-500/30 border-emerald-400/50 text-emerald-200" : "border-white/10 bg-white/5 hover:bg-white/10 text-white/70"
+                }`}
+              >
+                {pttTouch ? "🎙️ 松开即发送" : pttProcessing ? "🔄 正在转换…" : "🎙️ 按住说话"}
+              </button>
+              <div className="text-xs text-white/40 text-center w-40">
+                {pttProcessing ? "正在识别语音…" : "按住说话，松开发送；也可打字"}
+              </div>
+            </div>
+          )}
 
-      {/* 视频房间：语音模式共用；纯文字流则只关心对话，不展示视频 */}
-      {mode !== "text" && (
-        <div className="mb-4">
-          <InterviewRoom interviewId={id} />
-        </div>
-      )}
-
-      {!done && partial && (
-        <div className="mb-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm">
-          <span className="text-white/40">你正在说：</span>
-          <span className="text-white/85">{partial}</span>
-        </div>
-      )}
-
-      {/* Input: mode-aware */}
-      {!done && mode === "ptt" && (
-        <div className="mb-3 flex items-center gap-2">
-          <button
-            onPointerDown={pttDown}
-            onPointerUp={pttUp}
-            onPointerLeave={pttUp}
-            onContextMenu={(e) => e.preventDefault()}
-            className={`flex-1 select-none rounded-lg border px-5 py-3 font-semibold transition-colors ${
-              pttTouch ? "bg-emerald-500/30 border-emerald-400/50 text-emerald-200" : "border-white/10 bg-white/5 hover:bg-white/10 text-white/70"
-            }`}
-          >
-            {pttTouch ? "🎙️ 松开即发送" : "🎙️ 按住说话"}
-          </button>
-          <div className="text-xs text-white/40 text-center w-40">
-            {voice.pttStatus === "processing" ? "AI 思考中…" : "按住说话，松开发送；也可打字"}
+          <div className="flex gap-2 items-stretch">
+            <textarea
+              className="flex-1 rounded-lg border border-white/10 bg-white/5 p-3"
+              rows={2}
+              placeholder={done ? "面试已结束" : mode === "text" ? "输入你的回答(Enter 发送)…" : "打字回答(可选)…"}
+              value={answer}
+              onChange={(e) => setAnswer(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && send()}
+              disabled={done}
+            />
+            <button onClick={send} disabled={done || busy || !answer.trim()}
+              className="rounded-lg bg-indigo-500 hover:bg-indigo-400 disabled:opacity-50 px-5 font-semibold">发送</button>
+            {mode === "duplex" && (
+              <div
+                title={mic === "error" ? "语音通道不可用：可继续打字回答" : "全双工语音：麦克风常开，直接说话"}
+                className={`flex flex-col items-center justify-center gap-1 rounded-lg border px-4 min-w-[9.5rem] ${
+                  mic === "live" ? "border-emerald-500/40 bg-emerald-500/10" : mic === "error" ? "border-red-500/40 bg-red-500/10" : "border-white/10 bg-white/5"
+                }`}
+              >
+                <span className={`text-sm font-medium ${mic === "live" ? "text-emerald-400" : mic === "error" ? "text-red-400" : "text-white/60"}`}>
+                  {micLabel}
+                </span>
+                <span className="text-[10px] text-white/30">{mic === "live" ? "免按键 · 可随时打断" : "打字回答仍可用"}</span>
+              </div>
+            )}
           </div>
+          <p className="mt-2 text-xs text-white/40">
+            {mode === "text"
+              ? "文字对话：在输入框打字，Enter 发送。"
+              : mode === "ptt"
+                ? "按住说话：按住按钮说话，松开自动识别并让 AI 应答；语音气泡可点击重听。"
+                : "真实对话：麦克风常开，直接说话即可，AI 自动应答（说话可打断 AI）；也可在输入框打字回答。"}
+          </p>
         </div>
-      )}
 
-      <div className="flex gap-2 items-stretch">
-        <textarea
-          className="flex-1 rounded-lg border border-white/10 bg-white/5 p-3"
-          rows={2}
-          placeholder={done ? "面试已结束" : mode === "text" ? "输入你的回答(Enter 发送)…" : "打字回答(可选)…"}
-          value={answer}
-          onChange={(e) => setAnswer(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && send()}
-          disabled={done}
-        />
-        <button onClick={send} disabled={done || busy || !answer.trim()}
-          className="rounded-lg bg-indigo-500 hover:bg-indigo-400 disabled:opacity-50 px-5 font-semibold">发送</button>
-        {mode === "duplex" && (
-          <div
-            title={mic === "error" ? "语音通道不可用：可继续打字回答" : "全双工语音：麦克风常开，直接说话"}
-            className={`flex flex-col items-center justify-center gap-1 rounded-lg border px-4 min-w-[9.5rem] ${
-              mic === "live" ? "border-emerald-500/40 bg-emerald-500/10" : mic === "error" ? "border-red-500/40 bg-red-500/10" : "border-white/10 bg-white/5"
-            }`}
-          >
-            <span className={`text-sm font-medium ${mic === "live" ? "text-emerald-400" : mic === "error" ? "text-red-400" : "text-white/60"}`}>
-              {micLabel}
-            </span>
-            <span className="text-[10px] text-white/30">{mic === "live" ? "免按键 · 可随时打断" : "打字回答仍可用"}</span>
+        {/* 右屏竖列：AI 房间(头像) + 视频缩略图 + meet 基础控制（麦克风/摄像头/共享/聊天） */}
+        {mode !== "text" && (
+          <div className="w-[200px] shrink-0 rounded-xl border border-white/10 bg-white/[0.03] p-3 flex flex-col items-center gap-3">
+            <div className="w-full">
+              <InterviewRoom interviewId={id} />
+            </div>
+            <ControlDock />
+            {/* 驱动 AI 面试官进房（头像/语音/看屏）；此组件仅显示一条状态，不在右上角占位 */}
+            <div className="w-full">
+              <AgentPresence
+                interviewId={id}
+                active={!done && q !== "加载中…" && q !== "AI 面试官正在准备面试…"}
+                onRead={(text) => addTurn("ai", "【看屏幕】" + text.slice(0, 220))}
+              />
+            </div>
+            <div className="mt-auto w-full text-[10px] text-white/30 text-center">
+              左屏对话 · 右屏设备与画面
+            </div>
           </div>
         )}
       </div>
-      <p className="mt-2 text-xs text-white/40">
-        {mode === "text"
-          ? "文字对话：在输入框打字，Enter 发送。"
-          : mode === "ptt"
-            ? "按住说话：按住按钮说话，松开自动识别并让 AI 应答；打字作为备用。"
-            : "真实对话：麦克风常开，直接说话即可，AI 自动应答（说话可打断 AI）；也可在输入框打字回答。"}
-      </p>
     </main>
   );
 }

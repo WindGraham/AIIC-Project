@@ -18,8 +18,11 @@
 import { createRecorder, playAudioBase64, base64ToBlob } from "@/lib/voice";
 
 export interface PttCallbacks {
-  /** Live-ish partial while recording (best-effort; PTT sends a single burst). */
+  /** Best-effort while recording (PTT sends a single burst). */
   onRecording?: (active: boolean) => void;
+  /** The candidate's own recognized speech: `{text, audioWavB64}` — the room shows a
+   *  playable voice bubble with the transcript text beneath it. */
+  onCandidate?: (text: string, audioWavB64: string) => void;
   /** Agent's spoken line (the next interviewer question / follow-up). */
   onSpoken?: (text: string) => void;
   /** The interview is over. */
@@ -91,6 +94,11 @@ export function createPtt(interviewId: string, callbacks: PttCallbacks = {}): Pt
           body: JSON.stringify({ interview_id: interviewId, audio_b64: b64, format: "wav" }),
         })
       ).json();
+      // Show the candidate's own bubble (voice + transcript) so the user sees their
+      // spoken words were correctly recognized and sent.
+      if (d.text) callbacks.onCandidate?.(d.text, b64);
+      else if (!d.gated && !d.done) callbacks.onCandidate?.("（未能识别语音，请重试或打字）", b64);
+      if (d.gated) { callbacks.onError?.(d.state_label || "未到预约时间，暂不能答题。"); return; }
       if (d.done) callbacks.onDone?.();
       else if (d.spoken) {
         callbacks.onSpoken?.(d.spoken);

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   VideoConference,
   RoomContext,
@@ -156,7 +156,7 @@ function LiveRoom({
   return (
     <RoomContext.Provider value={room}>
       {ready ? (
-        <div style={{ height: 520 }} className="relative">
+        <div style={{ height: 300 }} className="relative">
           <VideoConference />
           <RoomAudioRenderer />
         </div>
@@ -199,6 +199,98 @@ function TaskPanel() {
         value={code}
         onChange={(e) => setCode(e.target.value)}
       />
+    </div>
+  );
+}
+
+/**
+ * ControlDock — 右侧竖列：小摄像头缩略图 + 麦克风/摄像头/共享屏 基础控制 + 聊天开关。
+ * 与 LiveKit 房间解耦（直接操作浏览器媒体设备），让"左屏对话、右侧设备控制"布局成立。
+ */
+export function ControlDock({ onChatOpen }: { onChatOpen?: (open: boolean) => void }) {
+  const camRef = useRef<HTMLVideoElement | null>(null);
+  const [camOn, setCamOn] = useState(false);
+  const [micOn, setMicOn] = useState(true);
+  const [screenOn, setScreenOn] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  // Reflect a camera stream into the small thumbnail.
+  async function toggleCam() {
+    if (camOn) {
+      camRef.current?.srcObject && (camRef.current.srcObject = null);
+      setCamOn(false);
+      return;
+    }
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ video: true });
+      if (camRef.current) { camRef.current.srcObject = s; await camRef.current.play().catch(() => {}); }
+      setCamOn(true);
+      setErr(null);
+    } catch (e: any) {
+      setErr("摄像头不可用：" + (e?.message || String(e)));
+    }
+  }
+
+  async function toggleMic() {
+    if (micOn) { setMicOn(false); return; }
+    try {
+      await navigator.mediaDevices.getUserMedia({ audio: true });
+      setMicOn(true);
+      setErr(null);
+    } catch (e: any) {
+      setErr("麦克风不可用：" + (e?.message || String(e)));
+    }
+  }
+
+  async function toggleScreen() {
+    if (screenOn) {
+      camRef.current?.srcObject && (camRef.current.srcObject = null);
+      setScreenOn(false);
+      return;
+    }
+    try {
+      const s = await (navigator.mediaDevices as any).getDisplayMedia({ video: true, audio: false });
+      const track = s.getVideoTracks()[0];
+      if (track) track.onended = () => setScreenOn(false);
+      if (camRef.current) { camRef.current.srcObject = s; await camRef.current.play().catch(() => {}); }
+      setScreenOn(true);
+      setErr(null);
+    } catch (e: any) {
+      setErr("共享屏失败：" + (e?.message || String(e)));
+    }
+  }
+
+  function toggleChat() {
+    const next = !chatOpen;
+    setChatOpen(next);
+    onChatOpen?.(next);
+  }
+
+  const Btn = ({ on, onClick, icon, label }: { on: boolean; onClick: () => void; icon: string; label: string }) => (
+    <button onClick={onClick} title={label}
+      className={`w-11 h-11 rounded-full flex items-center justify-center text-lg transition-colors ${on ? "bg-emerald-500/25 border-emerald-400/40" : "bg-white/5 border-white/15"}`}>
+      {icon}
+    </button>
+  );
+
+  return (
+    <div className="flex flex-col items-center gap-1">
+      {/* 小摄像头/共享屏缩略图（右上角） */}
+      <div className="w-[152px] h-[86px] rounded-lg bg-black/50 border border-white/10 overflow-hidden relative">
+        <video ref={camRef} muted playsInline className="w-full h-full object-cover" />
+        <span className="absolute bottom-0.5 left-1 text-[9px] text-white/50">
+          {screenOn ? "屏幕共享" : camOn ? "本地摄像头" : "摄像头关"}
+        </span>
+      </div>
+      {/* 竖列基础控制：视频/共享/麦克风/聊天 */}
+      <div className="flex flex-col gap-1.5 items-center pt-1">
+        <Btn on={camOn} onClick={toggleCam} icon="📷" label="摄像头" />
+        <Btn on={screenOn} onClick={toggleScreen} icon="🖥️" label="共享屏幕" />
+        <Btn on={micOn} onClick={toggleMic} icon={micOn ? "🎙️" : "🔇"} label="麦克风" />
+        <Btn on={chatOpen} onClick={toggleChat} icon="💬" label="聊天" />
+      </div>
+      {err && <div className="mt-1 max-w-[152px] text-[10px] text-red-400 text-center">{err}</div>}
     </div>
   );
 }

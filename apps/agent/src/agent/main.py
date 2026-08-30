@@ -686,7 +686,7 @@ def voice_answer(req: VoiceAnswer, user: dict = Depends(_auth_user)):
     else:
         speak = flow.opening_line()
     mp3 = synthesize(speak)
-    return {"text": req.audio_b64 and "…" or "", "spoken": speak, "next_question": speak,
+    return {"text": text if req.audio_b64 else "", "spoken": speak, "next_question": speak,
             "done": flow.done, "audio_b64": base64.b64encode(mp3).decode(),
             "section": flow.section_for_ui(), "phase": flow.phase}
 
