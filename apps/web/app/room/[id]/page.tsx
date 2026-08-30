@@ -443,23 +443,20 @@ export default function Room() {
 
         {/* 右屏竖列：AI 房间(头像) + 视频缩略图 + meet 基础控制（麦克风/摄像头/共享/聊天） */}
         {mode !== "text" && (
-          <div className="w-[200px] shrink-0 rounded-xl border border-white/10 bg-white/[0.03] p-3 flex flex-col items-center gap-3">
-            <div className="w-full">
-              <InterviewRoom interviewId={id} />
-            </div>
+          <aside className="w-[236px] shrink-0 rounded-xl border border-white/10 bg-white/[0.03] p-3 flex flex-col gap-3 overflow-y-auto">
+            <div className="text-[10px] text-white/30">🎥 AI 房间 / 远程画面</div>
+            <InterviewRoom interviewId={id} />
             <ControlDock />
-            {/* 驱动 AI 面试官进房（头像/语音/看屏）；此组件仅显示一条状态，不在右上角占位 */}
-            <div className="w-full">
-              <AgentPresence
-                interviewId={id}
-                active={!done && q !== "加载中…" && q !== "AI 面试官正在准备面试…"}
-                onRead={(text) => addTurn("ai", "【看屏幕】" + text.slice(0, 220))}
-              />
-            </div>
-            <div className="mt-auto w-full text-[10px] text-white/30 text-center">
+            {/* 驱动 AI 面试官进房（头像/语音/看屏） */}
+            <AgentPresence
+              interviewId={id}
+              active={!done && q !== "加载中…" && q !== "AI 面试官正在准备面试…"}
+              onRead={(text) => addTurn("ai", "【看屏幕】" + text.slice(0, 220))}
+            />
+            <div className="mt-auto text-[10px] text-white/30 text-center">
               左屏对话 · 右屏设备与画面
             </div>
-          </div>
+          </aside>
         )}
       </div>
     </main>

@@ -58,6 +58,8 @@ _FAILED: set[str] = set()
 # interview_id -> owner user_id, set at /start. Used to gate the live interview
 # endpoints & /report persistence to the interviewer's owner (cross-user safety).
 _OWNER: dict[str, str] = {}
+# booking_id -> interview_id, so the booking list can show each interview's prep status.
+_BOOKING_TO_INTERVIEW: dict[str, str] = {}
 # interview_id -> booking-derived live config (has_coding/notes/scenario/persona),
 # captured at /start so the flow uses the right structure (e.g. skip coding round).
 _BOOKING_CFG: dict[str, dict[str, Any]] = {}
@@ -249,12 +251,18 @@ def list_interviews(user: dict = Depends(_auth_user)):
             delta = (dt - now).total_seconds()
         except Exception:
             delta = 0
+        iid = _BOOKING_TO_INTERVIEW.get(b.get("id"))
+        prep = "not_started"  # 还没点"进入面试"，后台还没开始准备
+        if iid:
+            prep = _prep_status(iid)  # preparing | ready | failed
         out.append({
             **b,
             "seconds_until_start": int(max(0, delta)),
             "status": "available" if delta <= 0 else "scheduled",
             "asap": bool(b.get("asap", False)),
             "gate": bool(b.get("asap", False)) or delta <= 0,
+            "prep": prep,
+            "interview_id": iid,
         })
     out.sort(key=lambda x: x.get("scheduled_at", ""))
     return out
@@ -266,6 +274,7 @@ def start_interview(booking_id: str, user: dict = Depends(_auth_user)):
     if b is None:
         raise HTTPException(404, "booking not found")
     iid = str(uuid.uuid4())
+    _BOOKING_TO_INTERVIEW[booking_id] = iid
     persona = b.get("persona", "high-peer") if b.get("persona") in PERSONA_LEVELS else "high-peer"
     _PENDING.add(iid)
     _OWNER[iid] = user["id"]

@@ -158,6 +158,8 @@ export type Booking = {
   seconds_until_start?: number;
   status?: string;
   gate?: boolean;
+  prep?: "not_started" | "preparing" | "ready" | "failed";
+  interview_id?: string | null;
 };
 
 export async function listBookings(): Promise<Booking[]> {

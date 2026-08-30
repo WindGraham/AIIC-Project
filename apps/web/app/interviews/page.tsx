@@ -72,6 +72,12 @@ export default function Interviews() {
         {enriched.map((b) => {
           const st = STATUS[String(b.status)] || STATUS.scheduled;
           const gate = !!b.gate;
+          const prep = b.prep;
+          const prepDot =
+            prep === "ready" ? { c: "bg-emerald-500", t: "后台已准备完毕" }
+              : prep === "preparing" ? { c: "bg-yellow-400", t: "后台准备中…" }
+                : prep === "failed" ? { c: "bg-red-500", t: "后台准备失败" }
+                  : null;
           return (
             <div key={b.id} className="rounded-xl border border-white/10 p-4 flex items-center justify-between gap-4">
               <div className="min-w-0">
@@ -85,11 +91,21 @@ export default function Interviews() {
                 <div className={`text-sm mt-1 ${gate ? "text-green-400" : "text-yellow-400"}`}>
                   {b.asap ? "后台准备完毕即可答题" : gate ? "可进入 · agent 会回复" : `待开始 · 距开始 ${fmt(b.seconds_until_start || 0)}`}
                 </div>
+                {/* 后台准备状态 */}
+                {prepDot ? (
+                  <div className="flex items-center gap-1.5 text-xs mt-1">
+                    <span className={`inline-block w-2 h-2 rounded-full ${prepDot.c}`} />
+                    <span className="text-white/60">{prepDot.t}</span>
+                  </div>
+                ) : (
+                  <div className="text-xs text-white/30 mt-1">后台准备状态：未开始（在「面试列表」点进入后开始准备）</div>
+                )}
+                {prep === "failed" && <div className="text-xs text-red-400 mt-1">无法开始：请重试或联系管理员。</div>}
                 {b.has_coding && <div className="text-xs text-white/40 mt-1">含手撕代码</div>}
               </div>
-              <button onClick={() => enter(b)} disabled={!gate}
-                className={`shrink-0 rounded-lg p-2.5 font-semibold ${gate ? "bg-indigo-500 hover:bg-indigo-400" : "border border-white/10 text-white/30 cursor-not-allowed"}`}>
-                {gate ? "进入面试" : "未到时间"}
+              <button onClick={() => enter(b)} disabled={!gate || prep === "failed"}
+                className={`shrink-0 rounded-lg p-2.5 font-semibold ${gate && prep !== "failed" ? "bg-indigo-500 hover:bg-indigo-400" : "border border-white/10 text-white/30 cursor-not-allowed"}`}>
+                {prep === "failed" ? "无法进入" : gate ? "进入面试" : "未到时间"}
               </button>
             </div>
           );

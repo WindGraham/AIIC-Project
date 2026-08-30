@@ -161,7 +161,7 @@ function LiveRoom({
   return (
     <RoomContext.Provider value={room}>
       {ready ? (
-        <div style={{ height: 300 }} className="relative">
+        <div style={{ height: 200 }} className="relative">
           <VideoConference />
           <RoomAudioRenderer />
         </div>
@@ -297,28 +297,29 @@ export function ControlDock({
 
   const Btn = ({ on, onClick, icon, label }: { on: boolean; onClick: () => void; icon: string; label: string }) => (
     <button onClick={onClick} title={label}
-      className={`w-11 h-11 rounded-full flex items-center justify-center text-lg transition-colors ${on ? "bg-emerald-500/25 border-emerald-400/40" : "bg-white/5 border-white/15"}`}>
-      {icon}
+      className={`flex items-center gap-2 rounded-lg border px-3 py-2.5 text-sm transition-colors ${on ? "border-emerald-400/50 bg-emerald-500/20 text-emerald-200" : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"}`}>
+      <span className="text-base">{icon}</span>
+      <span className="text-left leading-tight">{label}</span>
     </button>
   );
 
   return (
-    <div className="flex flex-col items-center gap-1">
-      {/* 小摄像头/共享屏缩略图（右上角） */}
-      <div className="w-[152px] h-[86px] rounded-lg bg-black/50 border border-white/10 overflow-hidden relative">
+    <div className="flex flex-col gap-3 w-full">
+      {/* 小摄像头/共享屏缩略图 */}
+      <div className="w-full h-[92px] rounded-lg bg-black/50 border border-white/10 overflow-hidden relative">
         <video ref={camRef} muted playsInline className="w-full h-full object-cover" />
-        <span className="absolute bottom-0.5 left-1 text-[9px] text-white/50">
-          {screenOn ? "屏幕共享" : camOn ? "本地摄像头" : "摄像头关"}
+        <span className="absolute bottom-1 left-1 text-[9px] text-white/60 px-1 bg-black/40 rounded">
+          {screenOn ? "🖥️ 屏幕共享" : camOn ? "📷 本地摄像头" : "摄像头关"}
         </span>
       </div>
-      {/* 竖列基础控制：视频/共享/麦克风/聊天 */}
-      <div className="flex flex-col gap-1.5 items-center pt-1">
+      {/* 竖列控制：视频/共享/麦克风/聊天 */}
+      <div className="flex flex-col gap-2">
         <Btn on={camOn} onClick={toggleCam} icon="📷" label="摄像头" />
         <Btn on={screenOn} onClick={toggleShot} icon="🖥️" label="共享屏幕" />
         <Btn on={micOn} onClick={toggleMic} icon={micOn ? "🎙️" : "🔇"} label="麦克风" />
         <Btn on={chatOpen} onClick={toggleChat} icon="💬" label="聊天" />
       </div>
-      {err && <div className="mt-1 max-w-[152px] text-[10px] text-red-400 text-center">{err}</div>}
+      {err && <div className="max-w-full text-[10px] text-red-400 text-center">{err}</div>}
     </div>
   );
 }
