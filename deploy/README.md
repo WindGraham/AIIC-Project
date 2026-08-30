@@ -1,5 +1,8 @@
 # 部署
 
+> ✅ **已部署**：`https://mock.windgraham.art`（Nginx 反代 :3101 到生产 Next.js；agent API :8000；Let's Encrypt 证书已签发并自动续期）。
+> ⚠️ 注意：本机自身的 DNS resolver 对刚添加的 `mock.windgraham.art` 有**过期负缓存**（有时本地解析失败），**不影响外部访问**（1.1.1.1/8.8.8.8 均解析到 115.190.185.53）。如需本机直接访问可 `curl --resolve mock.windgraham.art:443:115.190.185.53 https://mock.windgraham.art/`。
+
 ## 1. SSH 访问（需要往服务器加 2 个 SSH 公钥）
 - 本机已生成一对：`deploy/aiic_ed25519.pub`（公钥，可提交）。**私钥 `deploy/aiic_ed25519` 已 gitignore，绝不上传。**
 - 把**本机公钥** + **你自己的另一把公钥**（或协作机器公钥）加入服务器：
