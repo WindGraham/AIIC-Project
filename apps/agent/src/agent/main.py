@@ -3,8 +3,10 @@ in-memory repo (the "agent API is the single source of truth" light path).
 Live interviewer logic (prep/live/post + voice) is layered on in later phases."""
 
 import base64
+import json
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
@@ -30,15 +32,17 @@ _CONTEXTS: dict[str, InterviewContext] = {}
 # contracts.InterviewContext and is produced by the prep phase.
 # ---------------------------------------------------------------------------
 class Booking(BaseModel):
-    id: str
-    resume_id: str
-    company: str
-    position: str
-    jd_text: str
-    scheduled_at: datetime
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = "模拟面试"
+    resume_id: str = ""
+    resume_text: str = ""
+    company: str = ""
+    position: str = ""
+    jd_text: str = ""
+    scheduled_at: datetime = Field(default_factory=datetime.utcnow)
     notes: str = ""
     has_coding: bool = True
-    scenario: str = "algorithm"  # algorithm | retest
+    scenario: str = "algorithm"  # algorithm | retest(保研复试占位)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -56,9 +60,31 @@ class Interview(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# In-memory store (light path; swap for Supabase without changing callers).
+# In-memory store (light path; swap for Supabase without changing callers),
+# with lightweight JSON file persistence so bookings survive agent restarts.
 # ---------------------------------------------------------------------------
 _STORE: dict[str, dict] = {"bookings": {}, "interviews": {}}
+_STORE_PATH = Path(__file__).resolve().parent / "data" / "store.json"
+
+
+def _load_store() -> None:
+    try:
+        if _STORE_PATH.exists():
+            data = json.loads(_STORE_PATH.read_text())
+            _STORE.update(data)
+    except Exception:
+        pass
+
+
+def _save_store() -> None:
+    try:
+        _STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _STORE_PATH.write_text(json.dumps(_STORE, ensure_ascii=False, default=str))
+    except Exception:
+        pass
+
+
+_load_store()
 
 
 @app.get("/health")
@@ -76,23 +102,51 @@ def health():
     }
 
 
-@app.post("/api/bookings", response_model=Booking, status_code=201)
-def create_booking(payload: Booking):
+@app.post("/api/interviews/book", response_model=Booking, status_code=201)
+def book_interview(payload: Booking):
     payload.id = payload.id or str(uuid.uuid4())
     _STORE["bookings"][payload.id] = payload.model_dump()
+    _save_store()
     return payload
 
 
-@app.get("/api/bookings/{booking_id}", response_model=Booking)
-def get_booking(booking_id: str):
-    if booking_id not in _STORE["bookings"]:
-        raise HTTPException(404, "booking not found")
-    return _STORE["bookings"][booking_id]
-
-
-@app.get("/api/interviews", response_model=list[Interview])
+@app.get("/api/interviews")
 def list_interviews():
-    return list(_STORE["interviews"].values())
+    out = []
+    for b in _STORE["bookings"].values():
+        scheduled = b.get("scheduled_at")
+        try:
+            delta = (datetime.fromisoformat(str(scheduled)) - datetime.utcnow()).total_seconds()
+        except Exception:
+            delta = 0
+        out.append({
+            **b,
+            "seconds_until_start": int(max(0, delta)),
+            "status": "available" if delta <= 0 else "scheduled",
+        })
+    out.sort(key=lambda x: x.get("scheduled_at", ""))
+    return out
+
+
+@app.post("/api/interviews/{booking_id}/start", status_code=201)
+def start_interview(booking_id: str):
+    b = _STORE["bookings"].get(booking_id)
+    if b is None:
+        raise HTTPException(404, "booking not found")
+    # reuse the booking fields to build the interview context (real LLM prep)
+    ctx = build_plan(b.get("resume_text", ""), b.get("jd_text", ""), b.get("company", ""),
+                     b.get("position", ""), "mid", "zh")
+    iid = str(uuid.uuid4())
+    _CONTEXTS[iid] = ctx
+    from .pipeline import ask_current as _ask
+    return {
+        "interview_id": iid,
+        "booking_id": booking_id,
+        "question": _ask(ctx),
+        "plan": {"sections_order": ctx.plan.sections_order,
+                 "questions": [{"id": q.id, "section": q.section, "text": q.text,
+                                "difficulty": q.difficulty, "problem_id": q.problem_id} for q in ctx.plan.questions]},
+    }
 
 
 # ---------------------------------------------------------------------------
