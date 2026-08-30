@@ -7,6 +7,8 @@ hub when available, else a "unknown company" fallback."""
 
 from __future__ import annotations
 
+import hashlib
+
 from .contracts import (
     CandidateProfile,
     CodingTendency,
@@ -26,6 +28,38 @@ from .contracts import (
 from .llm import LLM
 
 SECTIONS = ["intro", "behavioral", "technical", "coding", "wrap"]
+
+_PROBLEMS: list[dict] | None = None
+
+
+def _load_problems() -> list[dict]:
+    """Load the offline hand-code problem bank (title_slug keyed). Lazy + cached."""
+    global _PROBLEMS
+    if _PROBLEMS is not None:
+        return _PROBLEMS
+    import json
+    from pathlib import Path
+    path = Path(__file__).resolve().parent / "data" / "problems.json"
+    try:
+        d = json.loads(path.read_text())
+        _PROBLEMS = d.get("problems", d) if isinstance(d, dict) else d
+    except Exception:
+        _PROBLEMS = []
+    return _PROBLEMS
+
+
+def pick_problem(topics: list[str] | None = None) -> dict | None:
+    """Pick a bank problem, preferring a topic match to the job's tech stack."""
+    probs = _load_problems()
+    if not probs:
+        return None
+    if topics:
+        tl = {t.lower() for t in topics}
+        for p in probs:
+            if any(ts in tl or ts.lower() in tl for ts in p.get("topic_slugs", [])):
+                return p
+    import random
+    return random.choice(probs)
 
 
 def _json(llm: LLM, system: str, user: str, retry: bool = True) -> dict:
@@ -51,7 +85,7 @@ def _extract_candidate(llm: LLM, resume_text: str) -> CandidateProfile:
         experience=j.get("experience", []) or [],
         projects=j.get("projects", []) or [],
         level=j.get("level", "mid"),
-        resume_hash=str(abs(hash(resume_text[:200]))),
+        resume_hash=hashlib.md5(resume_text[:200].encode("utf-8", "ignore")).hexdigest()[:16],
     )
 
 
@@ -165,6 +199,12 @@ def build_plan(resume_text: str, jd_text: str, company: str, position: str, seni
         gap = GapAnalysis(strengths=candidate.skills, gaps=[], probe_targets=candidate.projects[:2], missing_skills=[])
 
     plan = _build_plan(llm, job, gap, company_intel, lang)
+    # attach a real offline problem to the coding round (for the hand-code persona)
+    for q in plan.questions:
+        if q.section == "coding" and not q.problem_id:
+            prob = pick_problem(job.tech_stack or [])
+            if prob:
+                q.problem_id = prob.get("title_slug")
     scorecard = Scorecard(overall=0, items=[], summary="", next_steps=[], model_answers=[],
                           interviewer_os=InterviewerOS(hidden_concern="", why_this_question=[], missing_slots=[], risk_level="low"))
     return InterviewContext(candidate=candidate, job=job, company=company_intel, gap=gap,
