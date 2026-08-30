@@ -199,8 +199,13 @@ class LiveFlow:
         return (time.monotonic() - self.started_at) / 60.0
 
     def _group_elapsed_min(self) -> float:
+        """Conversation-phase elapsed (up to the point coding started)."""
         if self.coding_elapsed_start is not None:
             return (self.coding_elapsed_start - self.started_at) / 60.0
+        return self._elapsed_min()
+
+    def _true_elapsed_min(self) -> float:
+        """Real elapsed since the interview started (keeps running during coding)."""
         return self._elapsed_min()
 
     def _state_answer_count(self) -> int:
@@ -299,7 +304,7 @@ class LiveFlow:
         """Build the full per-round prompt and ask the LLM for the next line."""
         state = self.state
         self._asked_in_state = state  # the question we generate belongs to this state
-        elapsed = self._group_elapsed_min()
+        elapsed = self._true_elapsed_min()
         remaining = max(0.0, self.group_min + self.coding_min - elapsed)
         next_state = self._next_state_name()
         persona = _persona_line(getattr(self.ctx, "persona", "high-peer"))

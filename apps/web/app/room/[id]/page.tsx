@@ -178,13 +178,18 @@ export default function Room() {
     addTurn("cand", a);
     setBusy(true);
     try {
-      const d = await fetch(`/api/interviews/${id}/answer`, {
+      const r = await fetch(`/api/interviews/${id}/answer`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ answer: a }),
-      }).then((r) => r.json());
-      if (d.next_question) { addTurn("ai", d.next_question); setQ(d.next_question); }
-      else setDone(true);
+      });
+      const d = await r.json();
+      if (!r.ok) { throw new Error(d.detail || d.error || `请求失败(${r.status})`); }
+      if (d.done) { setDone(true); }
+      else if (d.next_question) { addTurn("ai", d.next_question); setQ(d.next_question); }
       setSection(d.section);
       setStateLabel(d.state_label || d.phase || null);
+    } catch (ex) {
+      // Surface a non-fatal error but keep the conversation going (retry possible).
+      addTurn("ai", "（发送出错，请重试一次：" + String(ex).slice(0, 90) + "）");
     } finally { setBusy(false); }
   }
 
@@ -272,7 +277,7 @@ export default function Room() {
         </div>
       )}
 
-      {(section === "coding" || section === "wrap") && !done && (
+      {section === "coding" && !done && (
         <div className="mb-4">
           <CodingPanel interviewId={id} />
         </div>

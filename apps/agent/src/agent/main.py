@@ -320,12 +320,13 @@ class ResumeIn(BaseModel):
 
 
 @app.post("/api/parse/resume")
-async def parse_resume(req: dict):
+def parse_resume(req: dict):
     """Decode an uploaded resume file (pdf/docx/md/txt/xlsx) to plain text.
 
     The browser sends the file bytes as base64 (single in-memory request), the
     agent decodes them offline and returns the extracted text so the web page can
-    populate the resume_text field. No LLM call involved.
+    populate the resume_text field. No LLM call involved. Declared as a sync `def`
+    so FastAPI runs file I/O + parsing in a worker thread (does not block the loop).
     """
     import base64 as _b64
 

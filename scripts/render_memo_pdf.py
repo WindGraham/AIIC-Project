@@ -43,14 +43,8 @@ th { background: #eef2ff; color: #3730a3; font-weight: 600; }
 """
 
 
-def clean_autolinks(txt: str) -> str:
-    # Wrap bare <https://...> / <github...> so markdown keeps them plain + styled
-    return re.sub(r"<((?:https?://|github\.com|WindGraham).*?)>", r"<span>&lt;\1&gt;</span>", txt)
-
-
 def build_html() -> str:
     md = SRC.read_text(encoding="utf-8")
-    md = clean_autolinks(md)
     body = markdown.markdown(md, extensions=["tables", "fenced_code", "sane_lists"])
     return f"<!doctype html><html lang='zh'><head><meta charset='utf-8'><style>{CSS}</style></head><body>{body}</body></html>"
 
