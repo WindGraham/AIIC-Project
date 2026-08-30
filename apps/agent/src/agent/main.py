@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket
 from pydantic import BaseModel, Field
 
 from .config import get_settings
@@ -22,6 +22,7 @@ from .pipeline import ask_current, current_question, finalize, record_answer
 from .prep import build_plan
 from .stt import transcribe_flash
 from .tts import synthesize
+from .voice_ws import voice_ws_handler
 from .livekit_bridge import (
     agent_join as livekit_agent_join,
     agent_leave as livekit_agent_leave,
@@ -501,6 +502,13 @@ def voice_answer(req: VoiceAnswer, user: dict = Depends(_auth_user)):
     cq = current_question(ctx)
     return {"text": text, "spoken": speak, "next_question": nxt, "done": nxt is None,
             "audio_b64": base64.b64encode(mp3).decode(), "section": cq.section if cq else None}
+
+
+@app.websocket("/ws/voice")
+async def ws_voice(websocket: WebSocket, interview_id: str = ""):
+    """Full-duplex phone-call voice channel: streaming STT partials + streaming
+    TTS chunks on one socket, interruptible (barge-in). See voice_ws.py."""
+    await voice_ws_handler(websocket, interview_id)
 
 
 # ---------------------------------------------------------------------------

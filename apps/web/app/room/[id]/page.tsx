@@ -3,14 +3,21 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { createRecorder } from "@/lib/voice";
-import { speakInterviewer } from "@/lib/agentPresence";
+import { createFullDuplex, type FullDuplexHandle } from "@/lib/fullDuplexVoice";
 import CodingPanel from "@/app/components/CodingPanel";
 import ScreenRead from "@/app/components/ScreenRead";
 import InterviewRoom from "@/app/components/InterviewRoom";
 import AgentPresence from "@/app/components/AgentPresence";
 
 type Turn = { role: "ai" | "cand"; text: string };
+type MicState = "off" | "connecting" | "live" | "error";
+
+const MIC_LABEL: Record<MicState, string> = {
+  off: "🔇 语音未启动",
+  connecting: "⏳ 连接语音…",
+  live: "🎙️ 聆听中，直接说话",
+  error: "🔇 语音不可用",
+};
 
 export default function Room() {
   const params = useParams<{ id: string }>();
@@ -21,12 +28,19 @@ export default function Room() {
   const [convo, setConvo] = useState<Turn[]>([]);
   const [answer, setAnswer] = useState("");
   const [busy, setBusy] = useState(false);
-  const [recording, setRecording] = useState(false);
   const [section, setSection] = useState<string | null>(null);
   const [showTranscript, setShowTranscript] = useState(false);
-  const recRef = useRef<{ start(): Promise<void>; stop(): Promise<string> } | null>(null);
+  // full-duplex voice state
+  const [live, setLive] = useState(false); // interview question loaded → start voice
+  const [mic, setMic] = useState<MicState>("off");
+  const [partial, setPartial] = useState("");
+  const fdRef = useRef<FullDuplexHandle | null>(null);
+  const lastAiRef = useRef<string>("");
 
-  const addTurn = (role: "ai" | "cand", text: string) => setConvo((c) => [...c, { role, text }]);
+  const addTurn = (role: "ai" | "cand", text: string) => {
+    if (role === "ai") lastAiRef.current = text;
+    setConvo((c) => [...c, { role, text }]);
+  };
 
   // on mount: load the first question (text) + speak it (voice start).
   // If /start returned a "preparing" state, poll /next until the context is built.
@@ -47,19 +61,57 @@ export default function Room() {
         setSection(d.section);
         if (d.question) addTurn("ai", d.question);
         if (d.done) setDone(true);
-        // speak the current question
-        try {
-          const v = await (await fetch("/api/voice/answer", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ interview_id: id, audio_b64: "" }),
-          })).json();
-          if (v.audio_b64) await speakInterviewer(v.audio_b64);
-        } catch {}
+        // The AI's voice is driven by the FULL-DUPLEX channel (createFullDuplex);
+        // the agent announces the first question there. We do NOT speak here a
+        // second time (avoids triple audio) — only set the interview live.
+        if (!d.done) setLive(true); // interview is live → open the continuous voice channel
       } catch {
         setQ("无法加载面试。");
       }
     })();
   }, [id]);
+
+  // full-duplex voice: continuous listen + agent speak-back (phone-call style)
+  useEffect(() => {
+    if (!live || done) return;
+    let cancelled = false;
+    fdRef.current = createFullDuplex(id, {
+      onPartial: (t) => { if (!cancelled) setPartial(t); },
+      onFinal: (t) => {
+        if (cancelled) return;
+        setPartial("");
+        const txt = t.trim();
+        if (txt) addTurn("cand", txt);
+      },
+      onSpoken: (t) => {
+        if (cancelled) return;
+        const txt = t.trim();
+        if (!txt || txt === lastAiRef.current) return; // dedupe agent's first-line announce
+        addTurn("ai", txt);
+        setQ(txt);
+      },
+      onAudio: () => { /* engine queues chunks; gapless playback is internal */ },
+      onDone: () => { if (!cancelled) setDone(true); },
+      onStatus: (s) => {
+        if (cancelled) return;
+        setMic(s === "live" ? "live" : s === "starting" ? "connecting" : s === "error" ? "error" : "off");
+      },
+    });
+    fdRef.current.start().catch(() => { /* mic denied / agent down → text path still works */ });
+    return () => {
+      cancelled = true;
+      try { fdRef.current?.stop(); } catch {}
+      fdRef.current = null;
+    };
+  }, [id, live]);
+
+  // stop the voice channel once the interview is over
+  useEffect(() => {
+    if (done) {
+      try { fdRef.current?.stop(); } catch {}
+      setPartial("");
+    }
+  }, [done]);
 
   async function send() {
     if (!answer.trim() || busy) return;
@@ -75,31 +127,6 @@ export default function Room() {
       else setDone(true);
       setSection(d.section);
     } finally { setBusy(false); }
-  }
-
-  async function onPttStart() {
-    if (busy || done) return;
-    setRecording(true);
-    recRef.current = createRecorder();
-    await recRef.current.start();
-  }
-
-  async function onPttEnd() {
-    if (!recRef.current) return;
-    setBusy(true);
-    const audio = await recRef.current.stop();
-    setRecording(false);
-    try {
-      const d = await (await fetch("/api/voice/answer", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ interview_id: id, audio_b64: audio, format: "wav" }),
-      })).json();
-      if (d.text) addTurn("cand", d.text);
-      if (d.next_question) { addTurn("ai", d.next_question); setQ(d.next_question); }
-      else setDone(true);
-      setSection(d.section);
-      if (d.audio_b64) await speakInterviewer(d.audio_b64);
-    } finally { setBusy(false); recRef.current = null; }
   }
 
   function downloadTranscript() {
@@ -185,6 +212,13 @@ export default function Room() {
         </div>
       )}
 
+      {!done && partial && (
+        <div className="mb-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm">
+          <span className="text-white/40">你正在说：</span>
+          <span className="text-white/85">{partial}</span>
+        </div>
+      )}
+
       <div className="flex gap-2 items-stretch">
         <textarea
           className="flex-1 rounded-lg border border-white/10 bg-white/5 p-3"
@@ -197,17 +231,19 @@ export default function Room() {
         />
         <button onClick={send} disabled={done || busy || !answer.trim()}
           className="rounded-lg bg-indigo-500 hover:bg-indigo-400 disabled:opacity-50 px-5 font-semibold">发送</button>
-        <button
-          onPointerDown={onPttStart}
-          onPointerUp={onPttEnd}
-          onPointerLeave={() => recording && onPttEnd()}
-          disabled={done || busy}
-          className={`rounded-lg px-5 font-semibold ${recording ? "bg-red-500 text-white" : "bg-white/10 hover:bg-white/20"}`}
+        <div
+          title={mic === "error" ? "语音通道不可用：可继续打字回答" : "全双工语音：麦克风常开，直接说话"}
+          className={`flex flex-col items-center justify-center gap-1 rounded-lg border px-4 min-w-[9.5rem] ${
+            mic === "live" ? "border-emerald-500/40 bg-emerald-500/10" : mic === "error" ? "border-red-500/40 bg-red-500/10" : "border-white/10 bg-white/5"
+          }`}
         >
-          {recording ? "录音中…" : "🎤按住说话"}
-        </button>
+          <span className={`text-sm font-medium ${mic === "live" ? "text-emerald-400" : mic === "error" ? "text-red-400" : "text-white/60"}`}>
+            {MIC_LABEL[mic]}
+          </span>
+          <span className="text-[10px] text-white/30">{mic === "live" ? "免按键 · 可随时打断" : "打字回答仍可用"}</span>
+        </div>
       </div>
-      <p className="mt-2 text-xs text-white/40">按住说话用语音回答；也可在输入框打字。</p>
+      <p className="mt-2 text-xs text-white/40">全双工语音：麦克风常开，直接说话即可，AI 自动应答（说话可打断 AI）；也可在输入框打字回答。</p>
     </main>
   );
 }

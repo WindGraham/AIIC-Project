@@ -71,3 +71,14 @@ export function playAudioBase64(b64: string): Promise<void> {
     audio.play().then(() => resolve()).catch(() => resolve());
   });
 }
+
+/** Decode base64 (optionally a `data:<mime>;base64,` URL) into a Blob. */
+export function base64ToBlob(b64: string, mime = "audio/mpeg"): Blob {
+  const s = b64.trim();
+  const idx = s.indexOf(",");
+  const clean = idx >= 0 ? s.slice(idx + 1) : s;
+  const bin = atob(clean);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
+}
