@@ -25,6 +25,24 @@ def current_question(ctx: InterviewContext):
     return None
 
 
+def ask_current(ctx: InterviewContext) -> str | None:
+    """Return the current question text (or None when the plan is exhausted)."""
+    q = current_question(ctx)
+    return q.text if q else None
+
+
+def record_answer(ctx: InterviewContext, answer_text: str) -> str | None:
+    """Record the candidate's answer for the current question, advance the
+    cursor, and return the next question text (or None when done). Used by the
+    HTTP turn API; the batch self-play loop calls something richer below."""
+    q = current_question(ctx)
+    if q is None:
+        return None
+    ctx.answers.append(AnswerRecord(question_id=q.id, transcript=answer_text or "(no answer)", status="answered"))
+    ctx.cursor += 1
+    return ask_current(ctx)
+
+
 def transcript_so_far(ctx: InterviewContext) -> str:
     lines = []
     for a in ctx.answers:
@@ -149,3 +167,11 @@ def run_interview_text(ctx: InterviewContext, candidate_responder: Callable[[str
     ctx.scorecard = _make_scorecard(llm, ctx)
     ctx.status = "complete"
     return ctx
+
+
+def finalize(ctx: InterviewContext, llm: LLM | None = None) -> Scorecard:
+    """Score whatever answers are present and return the report. Used by the HTTP turn API."""
+    llm = llm or LLM()
+    ctx.scorecard = _make_scorecard(llm, ctx)
+    ctx.status = "complete"
+    return ctx.scorecard
