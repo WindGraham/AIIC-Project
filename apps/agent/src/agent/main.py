@@ -2,6 +2,7 @@
 in-memory repo (the "agent API is the single source of truth" light path).
 Live interviewer logic (prep/live/post + voice) is layered on in later phases."""
 
+import base64
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -13,6 +14,8 @@ from .config import get_settings
 from .contracts import InterviewContext
 from .pipeline import ask_current, finalize, record_answer
 from .prep import build_plan
+from .stt import transcribe_flash
+from .tts import synthesize
 
 app = FastAPI(title="aiic-agent", version="0.1.0")
 
@@ -155,3 +158,61 @@ def report(interview_id: str):
                               for m in os_.missing_slots],
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Voice (PTT) endpoints — Volcengine STT + MiniMax TTS
+# ---------------------------------------------------------------------------
+class TTSCall(BaseModel):
+    text: str
+    voice: str | None = None
+
+
+class STTCall(BaseModel):
+    audio_b64: str
+    format: str = "wav"
+    mime: str | None = None
+
+
+class VoiceAnswer(BaseModel):
+    interview_id: str
+    audio_b64: str = ""
+    format: str = "wav"
+    mime: str | None = None
+
+
+@app.post("/api/voice/tts")
+def voice_tts(req: TTSCall):
+    mp3 = synthesize(req.text, req.voice)
+    return {"audio_b64": base64.b64encode(mp3).decode(), "bytes": len(mp3)}
+
+
+@app.post("/api/voice/stt")
+def voice_stt(req: STTCall):
+    from .stt import transcribe_audio
+    return {"text": transcribe_audio(req.audio_b64, req.mime)}
+
+
+@app.post("/api/voice/answer")
+def voice_answer(req: VoiceAnswer):
+    ctx = _CONTEXTS.get(req.interview_id)
+    if ctx is None:
+        raise HTTPException(404, "interview not prepared")
+    q = ask_current(ctx)
+    if q is None:
+        sc = finalize(ctx)
+        mp3 = synthesize("面试结束，感谢你的回答，可以查看你的报告了。")
+        return {"done": True, "text": "", "spoken": "面试结束，感谢你的回答。", "next_question": None,
+                "audio_b64": base64.b64encode(mp3).decode(), "report": True}
+    if req.audio_b64:
+        try:
+            text = transcribe_flash(req.audio_b64, req.format)
+        except Exception:
+            text = ""
+        nxt = record_answer(ctx, text)
+    else:
+        text, nxt = "", q  # start turn: speak the current question
+    speak = nxt if nxt else "面试结束，感谢你的回答，可以查看你的报告了。"
+    mp3 = synthesize(speak)
+    return {"text": text, "spoken": speak, "next_question": nxt, "done": nxt is None,
+            "audio_b64": base64.b64encode(mp3).decode()}
