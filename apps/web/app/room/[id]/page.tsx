@@ -115,7 +115,7 @@ export default function Room() {
   const [mic, setMic] = useState<MicState>("off");
   const [partial, setPartial] = useState("");
   const lastAiRef = useRef<string>("");
-  const [pttTouch, setPttTouch] = useState(false);
+  const [recording, setRecording] = useState(false);   // 点击开始录音 / 再点停止并发送
   const [pttProcessing, setPttProcessing] = useState(false); // converting speech -> text
   const recorderRef = useRef<ReturnType<typeof createSessionRecorder> | null>(null);
 
@@ -271,15 +271,17 @@ export default function Room() {
     } finally { setBusy(false); }
   }
 
-  // ---------- PTT press/release ----------
-  async function pttDown() {
-    setPttTouch(true);
-    const ok = await voice.engine?.press?.();
-    if (ok === false) setMic("error");
-  }
-  function pttUp() {
-    setPttTouch(false);
-    voice.engine?.release?.();
+  // ---------- PTT toggle（点击录音/再点停止发送） ----------
+  async function togglePtt() {
+    if (pttProcessing) return;
+    if (!recording) {
+      setRecording(true);
+      const ok = await voice.engine?.press?.();
+      if (ok === false) { setRecording(false); setMic("error"); }
+    } else {
+      setRecording(false);
+      voice.engine?.release?.();
+    }
   }
 
   function downloadTranscript() {
@@ -294,7 +296,7 @@ export default function Room() {
   const micLabel =
     mode === "text" ? null
       : mode === "ptt"
-        ? pttTouch ? "🎙️ 松开发送" : mic === "error" ? "🔇 语音不可用" : "按住说话"
+        ? recording ? "🎙️ 录音中，点击停止发送" : mic === "error" ? "🔇 语音不可用" : "点击录音"
         : mic === "off" ? "🔇 语音未启动" : mic === "connecting" ? "⏳ 连接语音…" : mic === "live" ? "🎙️ 聆听中，直接说话" : "🔇 语音不可用";
 
   return (
@@ -390,18 +392,16 @@ export default function Room() {
           {!done && mode === "ptt" && (
             <div className="mb-3 flex items-center gap-2">
               <button
-                onPointerDown={pttDown}
-                onPointerUp={pttUp}
-                onPointerLeave={pttUp}
-                onContextMenu={(e) => e.preventDefault()}
+                onClick={togglePtt}
+                disabled={pttProcessing}
                 className={`flex-1 select-none rounded-lg border px-5 py-3 font-semibold transition-colors ${
-                  pttTouch ? "bg-emerald-500/30 border-emerald-400/50 text-emerald-200" : "border-white/10 bg-white/5 hover:bg-white/10 text-white/70"
+                  recording ? "bg-emerald-500/30 border-emerald-400/50 text-emerald-200" : "border-white/10 bg-white/5 hover:bg-white/10 text-white/70"
                 }`}
               >
-                {pttTouch ? "🎙️ 松开即发送" : pttProcessing ? "🔄 正在转换…" : "🎙️ 按住说话"}
+                {recording ? "⏹️ 停止并发送" : pttProcessing ? "🔄 正在转换…" : "🎙️ 点击开始录音"}
               </button>
-              <div className="text-xs text-white/40 text-center w-40">
-                {pttProcessing ? "正在识别语音…" : "按住说话，松开发送；也可打字"}
+              <div className="text-xs text-white/40 text-center w-44">
+                {pttProcessing ? "正在识别语音…" : recording ? "正在录音，说完点右侧停止" : "点一下开始录音，再点一下停止并发送"}
               </div>
             </div>
           )}
@@ -436,7 +436,7 @@ export default function Room() {
             {mode === "text"
               ? "文字对话：在输入框打字，Enter 发送。"
               : mode === "ptt"
-                ? "按住说话：按住按钮说话，松开自动识别并让 AI 应答；语音气泡可点击重听。"
+                ? "点击一次开始录音，再点一次停止并发送；识别文字后由 AI 应答，语音气泡可点击重听。"
                 : "真实对话：麦克风常开，直接说话即可，AI 自动应答（说话可打断 AI）；也可在输入框打字回答。"}
           </p>
         </div>

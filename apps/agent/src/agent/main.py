@@ -1012,7 +1012,7 @@ async def agent_screenshare(interview_id: str, user: Optional[dict] = Depends(_o
 # ---------------------------------------------------------------------------
 class SearchRequest(BaseModel):
     query: str
-    limit: int = 10
+    limit: int = 50
 
 
 @app.post("/api/search")
@@ -1022,9 +1022,10 @@ def search(req: SearchRequest):
     query = (req.query or "").strip()
     if not query:
         raise HTTPException(400, "query is required")
+    limit = max(3, min(req.limit, 100))
     providers = [p for p in get_providers() if p.enabled]
-    sources = run_queries(providers, [query], per_query=min(max(req.limit, 3), 10),
-                          max_total=req.limit, deadline=45.0, workers=6)
+    sources = run_queries(providers, [query], per_query=min(max(limit, 6), 40),
+                          max_total=limit, deadline=limit * 1.1 + 20, workers=12)
     return {"query": query, "sources": [s.model_dump() for s in sources]}
 
 

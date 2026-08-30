@@ -8,7 +8,7 @@ import { useState } from "react";
  */
 export default function SearchTest() {
   const [query, setQuery] = useState("字节跳动 后端开发工程师 面经");
-  const [limit, setLimit] = useState(8);
+  const [limit, setLimit] = useState(50);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [result, setResult] = useState<{ sources: any[]; query: string } | null>(null);
@@ -48,7 +48,7 @@ export default function SearchTest() {
         />
         <select className="rounded-lg border border-white/10 bg-white/5 px-2 text-sm" value={limit}
           onChange={(e) => setLimit(Number(e.target.value))}>
-          {[3, 6, 10].map((n) => <option key={n} value={n}>{n} 条</option>)}
+          {[50, 80, 100].map((n) => <option key={n} value={n}>{n} 条</option>)}
         </select>
         <button onClick={run} disabled={busy}
           className="rounded-lg bg-indigo-500 hover:bg-indigo-400 disabled:opacity-50 px-4 py-2 text-sm font-semibold">

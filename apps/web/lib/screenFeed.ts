@@ -29,14 +29,18 @@ function toJpegB64(video: HTMLVideoElement): string {
   return canvas.toDataURL("image/jpeg", 0.8).split(",")[1];
 }
 
-/** 每 2s 取最新一帧（只保留最新；旧的被覆盖）。 */
+/** 每 2s 取最新一帧（只保留最新；旧的被覆盖）。若摄像头/共享都关了，就自动停流。 */
 async function capture() {
   if (stoppedRef) return;
   const room = getLiveKitRoom();
   if (!room) return;
   const pubs = room.localParticipant.getTrackPublications();
   const hasVideo = pubs.some((p) => p.track?.kind === "video");
-  if (!hasVideo) return;
+  if (!hasVideo) {
+    // 监测到摄像头/共享关闭 -> 停止实时视频流识别。
+    stopScreenFeed();
+    return;
+  }
 
   const scr = pubs.find((p) => p.track?.kind === "video" && (p.source as string) === "screen_share");
   const src = scr?.track?.mediaStreamTrack || pubs.find((p) => p.track?.kind === "video")?.track?.mediaStreamTrack;

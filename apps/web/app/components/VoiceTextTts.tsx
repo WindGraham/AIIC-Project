@@ -71,21 +71,18 @@ export default function VoiceTextTts() {
     <div className="rounded-2xl border border-white/10 p-4">
       <div className="flex items-center justify-between mb-2">
         <div className="text-sm text-white/50">A. 语音气泡 → 文字 → TTS 语音</div>
-        <div className="text-xs text-white/40">按住说话</div>
+        <div className="text-xs text-white/40">点击开始 / 再点停止</div>
       </div>
 
       <div className="flex items-center gap-3">
         <button
-          onPointerDown={capture}
-          onPointerUp={release}
-          onPointerLeave={release}
-          onContextMenu={(e) => e.preventDefault()}
+          onClick={recording ? release : capture}
           disabled={busy}
           className={`select-none rounded-lg border px-6 py-3 font-semibold transition-colors ${
             recording ? "bg-emerald-500/30 border-emerald-400/50 text-emerald-200" : "border-white/10 bg-white/5 hover:bg-white/10 text-white/70"
           }`}
         >
-          {recording ? "松开即发送" : busy ? "转换中…" : "🎙️ 按住说话"}
+          {recording ? "⏹️ 停止并发送" : busy ? "转换中…" : "🎙️ 点击开始录音"}
         </button>
         {text && (
           <div className="flex items-center gap-2 rounded-xl bg-indigo-600 px-3 py-2 text-sm">
