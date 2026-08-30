@@ -13,7 +13,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from .config import get_settings
-from .store import get_store
+from .store import PERSONA_LEVELS, get_store
 from .contracts import InterviewContext
 from .coding import judge_code, load_problem
 from .llm import LLM
@@ -24,8 +24,9 @@ from .tts import synthesize
 
 app = FastAPI(title="aiic-agent", version="0.1.0")
 
-# in-memory contexts keyed by interview id (swap for Supabase later without changing callers)
+# in-memory contexts keyed by interview id (transient per live run)
 _CONTEXTS: dict[str, InterviewContext] = {}
+_MAX_CONTEXTS = 500  # guard against unbounded memory growth from unauthed prep
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +67,25 @@ class Interview(BaseModel):
 # Persistent user/session/resume/booking data lives in SQLite on the data disk
 # (apps/agent/src/agent/store.py -> settings.data_dir = /data/probedesk).
 # ---------------------------------------------------------------------------
+def _put_context(iid: str, ctx: InterviewContext) -> None:
+    """Store a live context, evicting the oldest once the cap is exceeded."""
+    if len(_CONTEXTS) >= _MAX_CONTEXTS:
+        try:
+            _CONTEXTS.pop(next(iter(_CONTEXTS)), None)
+        except StopIteration:
+            pass
+    _CONTEXTS[iid] = ctx
+
+
+@app.on_event("startup")
+def _startup():
+    """Opportunistic hygiene on boot: drop expired sessions."""
+    try:
+        get_store().purge_expired_sessions()
+    except Exception:
+        pass
+
+
 def _auth_user(authorization: str = Header(default="")) -> dict[str, Any]:
     """Bearer-token auth -> current user, or 401."""
     token = ""
@@ -94,7 +114,13 @@ def health():
 
 @app.post("/api/interviews/book", response_model=Booking, status_code=201)
 def book_interview(payload: Booking, user: dict = Depends(_auth_user)):
-    payload.id = payload.id or str(uuid.uuid4())
+    # Server-owned id: never trust a client-supplied id (prevents cross-user
+    # overwrite via INSERT OR REPLACE on a guessed/observed booking id).
+    payload.id = str(uuid.uuid4())
+    # Validate persona against the allow-list (block prompt-injection into the
+    # interviewer-planning LLM via the persona field).
+    if payload.persona not in PERSONA_LEVELS:
+        payload.persona = "high-peer"
     if not payload.name:
         payload.name = f"{payload.position or '模拟'}面试"
     get_store().save_booking(user["id"], payload.model_dump())
@@ -125,10 +151,11 @@ def start_interview(booking_id: str, user: dict = Depends(_auth_user)):
     if b is None:
         raise HTTPException(404, "booking not found")
     # reuse the booking fields to build the interview context (real LLM prep)
+    persona = b.get("persona", "high-peer") if b.get("persona") in PERSONA_LEVELS else "high-peer"
     ctx = build_plan(b.get("resume_text", ""), b.get("jd_text", ""), b.get("company", ""),
-                     b.get("position", ""), "mid", "zh", persona=b.get("persona", "high-peer"))
+                     b.get("position", ""), "mid", "zh", persona=persona)
     iid = str(uuid.uuid4())
-    _CONTEXTS[iid] = ctx
+    _put_context(iid, ctx)
     from .pipeline import ask_current as _ask
     return {
         "interview_id": iid,
@@ -238,7 +265,7 @@ class PrepareRequest(BaseModel):
 def prepare(req: PrepareRequest):
     interview_id = str(uuid.uuid4())
     ctx = build_plan(req.resume_text, req.jd_text, req.company, req.position, req.seniority, req.lang)
-    _CONTEXTS[interview_id] = ctx
+    _put_context(interview_id, ctx)
     return {
         "interview_id": interview_id,
         "question": ask_current(ctx),

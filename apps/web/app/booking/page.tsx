@@ -1,37 +1,71 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import type { Resume } from "@/lib/agent";
+
+const PERSONAS = [
+  { value: "peer", label: "同级同事", desc: "平等友好，重在技术切磋、引导与鼓励" },
+  { value: "high-peer", label: "资深同级", desc: "专业平等，重方法、复杂度与工程取舍" },
+  { value: "manager", label: "主管", desc: "正式有压迫感，重全局判断与 owner-ship" },
+];
 
 export default function Booking() {
   const router = useRouter();
+  const [resumes, setResumes] = useState<Resume[]>([]);
   const [f, setF] = useState({
+    name: "",
+    resume_id: "",
     resume_text: "",
-    jd_text: "",
     company: "",
     position: "",
-    seniority: "mid",
-    lang: "zh",
+    jd_text: "",
+    scheduled_at: "",
+    notes: "",
+    has_coding: true,
+    scenario: "algorithm",
+    persona: "high-peer",
   });
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  const load = useCallback(async () => {
+    const r = await fetch("/api/resumes");
+    if (r.ok) setResumes(await r.json());
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) =>
     setF((s) => ({ ...s, [k]: e.target.value }));
+
+  function pickResume(id: string) {
+    const r = resumes.find((x) => x.id === id);
+    setF((s) => ({ ...s, resume_id: id, resume_text: r?.resume_text || s.resume_text }));
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setErr(null);
+    if (!f.resume_text.trim()) { setErr("请选择或粘贴一份简历"); return; }
     setBusy(true);
     try {
-      const r = await fetch("/api/interviews/prepare", {
+      const payload = {
+        ...f,
+        scheduled_at: f.scheduled_at ? new Date(f.scheduled_at).toISOString() : undefined,
+        company: f.company || "目标公司",
+        position: f.position || "后端开发工程师",
+      };
+      const r = await fetch("/api/interviews/book", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(f),
+        body: JSON.stringify(payload),
       });
       const d = await r.json();
-      if (!r.ok) throw new Error(d.error || "准备面试失败");
-      router.push(`/room/${d.interview_id}`);
+      if (!r.ok) throw new Error(d.error || "预约失败");
+      router.push("/interviews");
     } catch (ex) {
       setErr(String(ex));
     } finally {
@@ -40,21 +74,33 @@ export default function Booking() {
   }
 
   return (
-    <main className="max-w-xl mx-auto p-8">
+    <main className="max-w-2xl mx-auto p-6">
       <h1 className="text-2xl font-bold mb-1">预约模拟面试</h1>
-      <p className="text-white/50 text-sm mb-6">填入简历、岗位描述与目标公司，AI 面试官会立即生成一场专属面试。</p>
+      <p className="text-white/50 text-sm mb-6">选择简历、公司/岗位/JD、时间与面试官人格。可提前进入房间，AI 面试官到点才加入。</p>
 
       <form onSubmit={submit} className="flex flex-col gap-4">
         <label className="flex flex-col gap-1 text-sm">
-          简历（文本粘贴）
-          <textarea className="rounded-lg border border-white/10 bg-white/5 p-3" rows={5}
-            value={f.resume_text} onChange={set("resume_text")} required />
+          面试名称
+          <input className="rounded-lg border border-white/10 bg-white/5 p-2" value={f.name}
+            onChange={set("name")} placeholder="如：字节后端模拟面" />
         </label>
+
         <label className="flex flex-col gap-1 text-sm">
-          岗位 JD（文本）
-          <textarea className="rounded-lg border border-white/10 bg-white/5 p-3" rows={4}
-            value={f.jd_text} onChange={set("jd_text")} required />
+          简历
+          <select className="rounded-lg border border-white/10 bg-white/5 p-2" value={f.resume_id}
+            onChange={(e) => pickResume(e.target.value)}>
+            <option value="">手动填写 / 使用下面的文本</option>
+            {resumes.map((r) => <option key={r.id} value={r.id}>{r.name}（{r.skills.length} 技能）</option>)}
+          </select>
         </label>
+        {f.resume_id === "" && (
+          <label className="flex flex-col gap-1 text-sm">
+            简历文本（粘贴）
+            <textarea className="rounded-lg border border-white/10 bg-white/5 p-3" rows={5}
+              value={f.resume_text} onChange={set("resume_text")} />
+          </label>
+        )}
+
         <div className="grid grid-cols-2 gap-4">
           <label className="flex flex-col gap-1 text-sm">
             公司
@@ -65,23 +111,54 @@ export default function Booking() {
             <input className="rounded-lg border border-white/10 bg-white/5 p-2" value={f.position} onChange={set("position")} />
           </label>
         </div>
+
         <label className="flex flex-col gap-1 text-sm">
-          职级
-          <select className="rounded-lg border border-white/10 bg-white/5 p-2" value={f.seniority} onChange={set("seniority")}>
-            <option value="junior">junior</option><option value="mid">mid</option>
-            <option value="senior">senior</option><option value="staff">staff</option>
-          </select>
+          岗位 JD（文本）
+          <textarea className="rounded-lg border border-white/10 bg-white/5 p-3" rows={4}
+            value={f.jd_text} onChange={set("jd_text")} />
+        </label>
+
+        <label className="flex flex-col gap-1 text-sm">
+          预约时间
+          <input type="datetime-local" className="rounded-lg border border-white/10 bg-white/5 p-2"
+            value={f.scheduled_at} onChange={set("scheduled_at")} />
+        </label>
+
+        <div className="grid grid-cols-2 gap-4">
+          <label className="flex flex-col gap-1 text-sm">
+            面试官人格
+            <select className="rounded-lg border border-white/10 bg-white/5 p-2" value={f.persona}
+              onChange={set("persona")}>
+              {PERSONAS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+            </select>
+            <span className="text-xs text-white/40">{PERSONAS.find((p) => p.value === f.persona)?.desc}</span>
+          </label>
+          <label className="flex flex-col gap-1 text-sm">
+            场景
+            <select className="rounded-lg border border-white/10 bg-white/5 p-2" value={f.scenario}
+              onChange={set("scenario")}>
+              <option value="algorithm">算法 / 研发（常规）</option>
+              <option value="retest">保研复试</option>
+            </select>
+          </label>
+        </div>
+
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={f.has_coding} onChange={(e) => setF((s) => ({ ...s, has_coding: e.target.checked }))} />
+          包含手撕代码环节
+        </label>
+
+        <label className="flex flex-col gap-1 text-sm">
+          补充信息（可选）
+          <textarea className="rounded-lg border border-white/10 bg-white/5 p-3" rows={2}
+            value={f.notes} onChange={set("notes")} />
         </label>
 
         {err && <div className="text-red-400 text-sm">{err}</div>}
         <button disabled={busy} className="rounded-lg bg-indigo-500 hover:bg-indigo-400 disabled:opacity-50 p-3 font-semibold">
-          {busy ? "生成面试中…" : "开始面试"}
+          {busy ? "提交中…" : "预约面试"}
         </button>
       </form>
-
-      <p className="mt-6 text-xs text-white/40">
-        支持简历、公司、岗位、JD、时间、补充信息、是否含手撕代码——此处先以核心三要素跑通垂直切片。
-      </p>
     </main>
   );
 }

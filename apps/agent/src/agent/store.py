@@ -169,6 +169,12 @@ class Store:
         with self._conn() as conn:
             conn.execute("DELETE FROM sessions WHERE token=?", (token,))
 
+    def purge_expired_sessions(self) -> int:
+        """Remove expired session rows. Returns the number deleted."""
+        with self._conn() as conn:
+            cur = conn.execute("DELETE FROM sessions WHERE expires_at < ?", (self._now().isoformat(),))
+        return cur.rowcount
+
     # -- resumes -------------------------------------------------------------
     def list_resumes(self, user_id: str) -> list[dict[str, Any]]:
         with self._conn() as conn:
