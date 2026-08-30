@@ -6,7 +6,7 @@ import { useParams } from "next/navigation";
 import { createRecorder, playAudioBase64 } from "@/lib/voice";
 import CodingPanel from "@/app/components/CodingPanel";
 import ScreenRead from "@/app/components/ScreenRead";
-import LiveKitRoom from "@/app/components/LiveKitRoom";
+import MeetRoom from "@/app/components/MeetRoom";
 
 type Turn = { role: "ai" | "cand"; text: string };
 
@@ -171,7 +171,7 @@ export default function Room() {
 
       {!done && (
         <div className="mb-4">
-          <LiveKitRoom interviewId={id} />
+          <MeetRoom interviewId={id} />
         </div>
       )}
 
