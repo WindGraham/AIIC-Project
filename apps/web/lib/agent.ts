@@ -70,3 +70,11 @@ export async function codingJudge(body: {
 export async function visionAnalyze(body: { image_b64: string; prompt?: string }): Promise<any> {
   return call("/api/vision/analyze", { method: "POST", body: JSON.stringify(body) });
 }
+
+export async function getTranscript(interviewId: string): Promise<any> {
+  return call(`/api/interviews/${interviewId}/transcript`);
+}
+
+export async function getRecap(interviewId: string): Promise<any> {
+  return call(`/api/interviews/${interviewId}/recap`);
+}

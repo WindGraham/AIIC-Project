@@ -274,3 +274,41 @@ def vision_analyze(req: VisionCall):
         return {"description": LLM().vision(req.prompt, req.image_b64, req.mime)}
     except Exception as e:
         return {"description": "", "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Transcript + share + audio recap (Phase 5)
+# ---------------------------------------------------------------------------
+def _transcript_items(ctx: InterviewContext) -> list[dict]:
+    plan_by_id = {q.id: q for q in ctx.plan.questions}
+    items = []
+    for a in ctx.answers:
+        q = plan_by_id.get(a.question_id)
+        if q and not a.transcript.startswith("[follow-up]"):
+            items.append({"question": q.text, "answer": a.transcript, "section": q.section})
+    return items
+
+
+@app.get("/api/interviews/{interview_id}/transcript")
+def get_transcript(interview_id: str):
+    ctx = _CONTEXTS.get(interview_id)
+    if ctx is None:
+        raise HTTPException(404, "interview not prepared")
+    items = _transcript_items(ctx)
+    text = "\n\n".join(f"Q({it['section']}): {it['question']}\nA: {it['answer']}" for it in items)
+    return {"items": items, "text": text, "meta": {"position": ctx.job.position, "company": ctx.job.company}}
+
+
+@app.get("/api/interviews/{interview_id}/recap")
+def get_recap(interview_id: str):
+    ctx = _CONTEXTS.get(interview_id)
+    if ctx is None:
+        raise HTTPException(404, "interview not prepared")
+    sc = ctx.scorecard if (ctx.scorecard and ctx.scorecard.items) else finalize(ctx)
+    lines = [f"这是你的模拟面试报告，综合得分 {sc.overall} 分。"]
+    for m in sc.interviewer_os.missing_slots[:3]:
+        lines.append(f"你觉得可以改进的有：{m.slot}。{m.one_line_advice}。")
+    lines.append("建议针对这些点重点练习，祝你求职顺利。")
+    text = "".join(lines)
+    mp3 = synthesize(text)
+    return {"text": text, "audio_b64": base64.b64encode(mp3).decode(), "overall": sc.overall}

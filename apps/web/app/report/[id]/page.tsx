@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { getReport } from "@/lib/agent";
+import ShareBar from "@/app/components/ShareBar";
 
 export const dynamic = "force-dynamic";
 
@@ -61,6 +62,7 @@ export default async function Report({ params }: { params: Promise<{ id: string 
       <p className="mt-6 text-xs text-white/40">
         面试官思考流程（interviewer_os）仅在报告呈现，全程面试中不实时展示。
       </p>
+      <ShareBar interviewId={id} />
       <Link href="/" className="mt-3 inline-block text-indigo-400">返回首页</Link>
     </main>
   );
