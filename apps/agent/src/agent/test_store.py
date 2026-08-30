@@ -91,3 +91,28 @@ def test_booking_roundtrip(store):
     u2 = store.create_user("erin2", "secret123")
     assert store.get_booking(u2["id"], b["id"]) is None
     assert len(store.list_bookings(u["id"])) == 1
+
+
+def test_report_save_and_dedupe(store):
+    u = store.create_user("frank", "secret123")
+    save = lambda: store.save_report(
+        u["id"], "iv-1", position="后端", company="字节", persona="manager",
+        overall=60.0, items=[{"competency": "coding", "score": 3.0}],
+        missing=[{"slot": "system-design", "why_it_matters": "x", "one_line_advice": "y"}],
+    )
+    save()
+    save()  # same interview_id -> upsert, not duplicate
+    reps = store.list_reports(u["id"])
+    assert len(reps) == 1
+    assert reps[0]["overall"] == 60.0
+    assert reps[0]["position"] == "后端"
+    assert reps[0]["missing"][0]["slot"] == "system-design"
+
+
+def test_report_is_user_scoped(store):
+    u1 = store.create_user("g1", "secret123")
+    u2 = store.create_user("g2", "secret123")
+    store.save_report(u1["id"], "iv-2", position="p", company="c", persona="peer",
+                      overall=70, items=[], missing=[])
+    assert len(store.list_reports(u1["id"])) == 1
+    assert len(store.list_reports(u2["id"])) == 0

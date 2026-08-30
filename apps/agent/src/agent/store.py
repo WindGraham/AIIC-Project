@@ -84,7 +84,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_resumes_user ON resumes(user_id);
 CREATE INDEX IF NOT EXISTS idx_bookings_user ON bookings(user_id);
 CREATE INDEX IF NOT EXISTS idx_reports_user ON reports(user_id);
-CREATE INDEX IF NOT EXISTS idx_reports_interview ON reports(interview_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reports_interview ON reports(interview_id);
 """
 
 PERSONA_LEVELS = ("peer", "high-peer", "manager")
@@ -316,12 +316,13 @@ class Store:
     # -- reports (cross-field memory / learning curve) ------------------------
     def save_report(self, user_id: str, interview_id: str, *, position: str, company: str,
                     persona: str, overall: float, items: list[dict], missing: list[dict]) -> None:
-        """Persist a finished interview result (C2: cross-field memory)."""
+        """Persist a finished interview result (C2). Upserts by interview_id so
+        re-reading /report never duplicates a row."""
         with self._conn() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO reports(id, user_id, interview_id, position, company, persona, "
                 "overall, items_json, missing_json, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (str(uuid.uuid4()), user_id, interview_id, position or "", company or "",
+                ("rpt-" + interview_id, user_id, interview_id, position or "", company or "",
                  persona or "high-peer", float(overall or 0),
                  json.dumps(items, ensure_ascii=False), json.dumps(missing, ensure_ascii=False),
                  self._now().isoformat()),

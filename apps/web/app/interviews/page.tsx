@@ -50,14 +50,12 @@ export default function Interviews() {
   });
 
   async function enter(b: Booking) {
-    if (b.status === "available") {
-      const r = await fetch(`/api/interviews/${b.id}/start`, { method: "POST" });
-      const d = await r.json();
-      if (!r.ok) { alert(d.error || "进入失败"); return; }
-      router.push(`/room/${d.interview_id}`);
-    } else {
-      router.push(`/room/${b.id}`);
-    }
+    // Always /start so the interview context (plan) exists; the room then polls
+    // /next which reports "preparing" until the plan is built.
+    const r = await fetch(`/api/interviews/${b.id}/start`, { method: "POST" });
+    const d = await r.json();
+    if (!r.ok) { alert(d.error || "进入失败"); return; }
+    router.push(`/room/${d.interview_id}`);
   }
 
   return (

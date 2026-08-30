@@ -6,7 +6,7 @@ import base64
 import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -35,6 +35,9 @@ from concurrent.futures import ThreadPoolExecutor  # noqa: E402
 
 _PREP_EXECUTOR = ThreadPoolExecutor(max_workers=2)
 _PENDING: set[str] = set()
+# interview_id -> owner user_id, set at /start. Used to gate the live interview
+# endpoints & /report persistence to the interviewer's owner (cross-user safety).
+_OWNER: dict[str, str] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -175,10 +178,15 @@ def book_interview(payload: Booking, user: dict = Depends(_auth_user)):
 @app.get("/api/interviews")
 def list_interviews(user: dict = Depends(_auth_user)):
     out = []
+    now = datetime.utcnow()
     for b in get_store().list_bookings(user["id"]):
         scheduled = b.get("scheduled_at")
         try:
-            delta = (datetime.fromisoformat(str(scheduled)) - datetime.utcnow()).total_seconds()
+            # scheduled_at is stored as ISO; may be tz-aware or naive. Normalize.
+            dt = datetime.fromisoformat(str(scheduled))
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+            delta = (dt - now).total_seconds()
         except Exception:
             delta = 0
         out.append({
@@ -198,6 +206,7 @@ def start_interview(booking_id: str, user: dict = Depends(_auth_user)):
     iid = str(uuid.uuid4())
     persona = b.get("persona", "high-peer") if b.get("persona") in PERSONA_LEVELS else "high-peer"
     _PENDING.add(iid)
+    _OWNER[iid] = user["id"]
 
     def _do_start():
         """Run build_plan (search + LLM) in a worker; store the context when done."""
@@ -359,8 +368,20 @@ def _require_ctx(interview_id: str) -> InterviewContext:
     return ctx
 
 
+def _check_owner(interview_id: str, user: Optional[dict[str, Any]] = None) -> None:
+    """Raise 403 if the interview has a recorded owner and the caller isn't it.
+
+    Best-effort cross-user guard: interviews created via /start record an owner;
+    anonymous/legacy prep-created interviews have none (public-by-id, e.g. /share).
+    """
+    owner = _OWNER.get(interview_id)
+    if owner and (user is None or user.get("id") != owner):
+        raise HTTPException(403, "not your interview")
+
+
 @app.get("/api/interviews/{interview_id}/next")
-def next_question(interview_id: str):
+def next_question(interview_id: str, user: Optional[dict] = Depends(_optional_user)):
+    _check_owner(interview_id, user)
     ctx, preparing = _ctx(interview_id)
     if preparing:
         return {"status": "preparing", "question": None, "done": False, "section": None}
@@ -370,7 +391,8 @@ def next_question(interview_id: str):
 
 
 @app.post("/api/interviews/{interview_id}/answer")
-def answer(interview_id: str, req: dict):
+def answer(interview_id: str, req: dict, user: dict = Depends(_auth_user)):
+    _check_owner(interview_id, user)
     ctx = _require_ctx(interview_id)
     nxt = record_answer(ctx, str(req.get("answer", "")))
     cq = current_question(ctx)
@@ -394,8 +416,9 @@ def report(interview_id: str, user: Optional[dict] = Depends(_optional_user)):
                               for m in os_.missing_slots],
         },
     }
-    # C2: persist the result so future interviews reuse the weak points.
-    if user is not None:
+    # C2: persist the result so future interviews reuse the weak points — but
+    # ONLY when the caller is the interview's owner (no cross-user memory leak).
+    if user is not None and (interview_id not in _OWNER or _OWNER[interview_id] == user["id"]):
         try:
             get_store().save_report(
                 user["id"], interview_id,
@@ -450,7 +473,8 @@ def voice_stt(req: STTCall):
 
 
 @app.post("/api/voice/answer")
-def voice_answer(req: VoiceAnswer):
+def voice_answer(req: VoiceAnswer, user: dict = Depends(_auth_user)):
+    _check_owner(req.interview_id, user)
     ctx = _require_ctx(req.interview_id)
     q = ask_current(ctx)
     if q is None:
@@ -497,7 +521,8 @@ def get_coding_problem(interview_id: str):
 
 
 @app.post("/api/coding/judge")
-def coding_judge(req: CodingJudgeRequest):
+def coding_judge(req: CodingJudgeRequest, user: dict = Depends(_auth_user)):
+    _check_owner(req.interview_id, user)
     ctx = _require_ctx(req.interview_id)
     q = _coding_question(ctx)
     prob = load_problem(q.problem_id) if q else None
