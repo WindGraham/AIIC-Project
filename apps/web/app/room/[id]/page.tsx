@@ -20,6 +20,7 @@ export default function Room() {
   const [busy, setBusy] = useState(false);
   const [recording, setRecording] = useState(false);
   const [section, setSection] = useState<string | null>(null);
+  const [showTranscript, setShowTranscript] = useState(false);
   const recRef = useRef<{ start(): Promise<void>; stop(): Promise<string> } | null>(null);
 
   const addTurn = (role: "ai" | "cand", text: string) => setConvo((c) => [...c, { role, text }]);
@@ -98,15 +99,36 @@ export default function Room() {
     } finally { setBusy(false); recRef.current = null; }
   }
 
+  function downloadTranscript() {
+    const text = convo.map((t) => `${t.role === "ai" ? "面试官" : "我"}: ${t.text}`).join("\n\n");
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `probedesk-transcript-${id}.txt`; a.click();
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <main className="max-w-2xl mx-auto p-8 flex flex-col min-h-screen">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-xl font-bold">面试房间</h1>
-        {done && (
-          <Link href={`/report/${id}`} className="rounded-lg bg-emerald-500 hover:bg-emerald-400 px-4 py-2 text-sm font-semibold">
-            查看面试报告
-          </Link>
-        )}
+        <div className="flex gap-2">
+          <button onClick={() => setShowTranscript((v) => !v)}
+            className="rounded-lg border border-white/10 hover:border-white/30 px-3 py-2 text-sm text-white/70">
+            {showTranscript ? "隐藏转写" : "实时转写"}
+          </button>
+          {convo.length > 0 && (
+            <button onClick={downloadTranscript}
+              className="rounded-lg border border-white/10 hover:border-white/30 px-3 py-2 text-sm text-white/70">
+              下载转写
+            </button>
+          )}
+          {done && (
+            <Link href={`/report/${id}`} className="rounded-lg bg-emerald-500 hover:bg-emerald-400 px-4 py-2 text-sm font-semibold">
+              查看面试报告
+            </Link>
+          )}
+        </div>
       </div>
 
       <div className="flex-1 flex flex-col gap-3 overflow-y-auto mb-4">
@@ -118,6 +140,21 @@ export default function Room() {
         ))}
         {done && <div className="text-center text-white/40 text-sm mt-4">面试结束，可查看报告。</div>}
       </div>
+
+      {showTranscript && (
+        <div className="mb-4 rounded-xl border border-white/10 p-3 max-h-48 overflow-auto bg-black/20">
+          <div className="text-xs text-white/40 mb-2">📝 实时转写（面试官思考流程不展示）</div>
+          {convo.length === 0 && <div className="text-white/30 text-sm">还没有对话，开始回答后会实时显示转写。</div>}
+          {convo.map((t, i) => (
+            <div key={i} className="text-sm mb-1">
+              <span className={`${t.role === "ai" ? "text-indigo-300" : "text-white/70"} font-medium`}>
+                {t.role === "ai" ? "面试官" : "我"}:
+              </span>{" "}
+              <span className="text-white/80">{t.text}</span>
+            </div>
+          ))}
+        </div>
+      )}
 
       {section === "coding" && !done && (
         <div className="mb-4">
