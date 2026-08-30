@@ -161,6 +161,7 @@ class LiveFlow:
         self.coding_elapsed_start: Optional[float] = None
         self._qseq = 0
         self._opened = False  # the opening self-intro has been spoken once
+        self._asked_in_state: str = "intro"  # state in which the LAST question was asked
 
         self.ctx.status = "live"
         self.ctx.cursor = 0
@@ -188,6 +189,9 @@ class LiveFlow:
     def section_for_ui(self) -> str:
         return _STATE_SECTION.get(self.state, "technical")
 
+    def _section_for_state(self, state: str) -> str:
+        return _STATE_SECTION.get(state, "technical")
+
     def open_states(self) -> list[str]:
         return self._states()
 
@@ -211,6 +215,7 @@ class LiveFlow:
         if self._opened:
             return self.turns[-1]["content"]
         self._opened = True
+        self._asked_in_state = "intro"
         line = (
             "你好，很高兴见到你。这是一场模拟面试，我会按顺序问你几部分："
             "先请你做自我介绍，再聊聊你的项目，然后我会就项目、你的能力和对这个岗位的看法深入聊，"
@@ -263,14 +268,17 @@ class LiveFlow:
             question_text = (prev or {}).get("content", "") if (prev or {}).get("role") == "assistant" else ""
             self._qseq += 1
             qid = f"live-q{self._qseq}"
+            # Tag the answer with the state in which the QUESTION was asked (the state
+            # may already have advanced past it by the time the answer is recorded).
+            asked_state = self._asked_in_state or self.state
             self.ctx.plan.questions.append(PlannedQuestion(
                 id=qid,
-                section=self.section_for_ui(),
+                section=self._section_for_state(asked_state),
                 text=(question_text or "（请描述你的相关经历）")[:400],
                 difficulty=3,
                 rubric=[RubricItem(point="depth", weight=1.0)],
                 followups=[],
-                target_competency=self.state,
+                target_competency=asked_state,
             ))
             self.ctx.answers.append(AnswerRecord(
                 question_id=qid,
@@ -290,6 +298,7 @@ class LiveFlow:
     def _ask_agent(self) -> str:
         """Build the full per-round prompt and ask the LLM for the next line."""
         state = self.state
+        self._asked_in_state = state  # the question we generate belongs to this state
         elapsed = self._group_elapsed_min()
         remaining = max(0.0, self.group_min + self.coding_min - elapsed)
         next_state = self._next_state_name()

@@ -153,6 +153,20 @@ def test_each_round_records_answer_and_question_for_scoring(monkeypatch):
     assert ctx.answers[-1].transcript == "这是回答。"
 
 
+def test_answer_tagged_with_the_question_state_not_advanced_state(monkeypatch):
+    """The answer to the intro question must be section intro, not the advanced state."""
+    ctx = _make_ctx()
+    flow = LiveFlow(ctx, turn_budgets={s: 1 for s in STATES})
+    monkeypatch.setattr(LiveFlow, "_ask_agent", lambda _self: "请介绍项目。")
+
+    flow.opening_line()  # asks intro question
+    flow.next_line("我叫张三。")  # answers intro -> advances to project
+    # The recorded planned question for this answer must be tagged intro.
+    last_q = ctx.plan.questions[-1]
+    assert last_q.section == "intro"
+    assert last_q.target_competency == "intro"
+
+
 def test_prompt_contains_identity_resume_requirements_and_history(monkeypatch):
     """The per-round agent prompt must include persona identity, candidate resume,
     this interview's requirements, and the full chat history."""
